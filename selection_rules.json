@@ -1,0 +1,57 @@
+{
+  "_about": "Selection rules for the discovery scan (2022-2023). The scan refuses to run until no TBD is left and this file is committed. Options for every TBD: docs/selection_menu.md. Keys starting with _ are notes.",
+
+  "_test_grid": "Already decided (CLAUDE.md): all categories plus taxonomy families, the earnings split, all five strategies, all three buckets, the organizers' horizons, the starter's OTM grid, tradeable 'post' entry, the playground measurements.",
+  "test_grid": {
+    "levels": ["tertiary", "secondary", "primary"],
+    "earnings_subsets": ["all", "alone", "cofiled"],
+    "strategies": ["long_call", "covered_call", "protective_put", "collar", "cash_secured_put"],
+    "buckets": ["1m", "2m", "3-6m"],
+    "horizons": [1, 2, 3, 5, 10, 21, 42, 63, "exp"],
+    "otm": [0.03, 0.05, 0.10],
+    "entry": "post",
+    "measures": ["realized_vs_implied", "iv_change", "skew_change", "drift"]
+  },
+
+  "_earnings_tags": "Which tags mark a filing as co-filed with earnings (Item 2.02).",
+  "earnings_tags": "TBD",
+
+  "_samples": "min_sets: tests with fewer matched sets are not run. low_sample_n: below this a result is flagged low-sample.",
+  "min_sets": "TBD",
+  "low_sample_n": "TBD",
+
+  "_inference": "p_value: 'p_perm' (exact permutation) or 'p_z' (normal approximation to the permutation draws). fdr_family: 'all', 'per_level', 'per_metric' or 'headline' (BH only inside the headline grid below; everything else is exploratory).",
+  "permutations": "TBD",
+  "p_value": "TBD",
+  "fdr_family": "TBD",
+  "fdr_q": "TBD",
+  "headline": "TBD",
+  "seed": 20261003,
+
+  "_robustness": "Filters a candidate must pass.",
+  "robustness": {
+    "trimmed_mean_frac": "TBD",
+    "trimmed_mean_same_sign": "TBD",
+    "leave_one_ticker_out": "TBD",
+    "leave_one_quarter_out": "TBD",
+    "plateau_min_same_sign_neighbours": "TBD"
+  },
+  "doubled_cost_must_hold": "TBD",
+
+  "_selection": "direction: 'event_better_and_net_positive' or 'event_better'. ranking: 'q_then_effect' or 'effect_then_q'.",
+  "selection": {
+    "direction": "TBD",
+    "allow_low_sample": "TBD",
+    "ranking": "TBD"
+  },
+  "max_candidates": "TBD",
+
+  "_confirmation": "How a candidate is confirmed on the 2024-2025 in-sample window (one test per candidate, same matched-null design, nothing on or after 2026-01-01). p_max_one_sided: one-sided p in the candidate's direction. multiple_testing across candidates: 'none', 'holm' or 'bonferroni'.",
+  "confirmation": {
+    "p_max_one_sided": "TBD",
+    "multiple_testing": "TBD",
+    "net_positive": "TBD",
+    "doubled_cost_must_hold": "TBD",
+    "min_sets": "TBD"
+  }
+}

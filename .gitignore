@@ -5,3 +5,6 @@
 .venv/
 .ipynb_checkpoints/
 __pycache__/
+
+# Local research outputs (licensed data and derived files) never leave the machine
+data/
