@@ -6,6 +6,19 @@ the outcome it affects is looked at. Every variant run is recorded in the test l
 
 ## Windows
 
+**Amendment, 2026-10-03 evening (before any 2024-25 outcome was analysed).** Massive's answer was that for
+this project we are only allowed to look at data from 2024-2025. Until Massive confirms that the 2022-23
+window used earlier as an exploratory discovery window is permitted, 2022-23 results are not used in any
+deliverable, and no new 2022-23 data is fetched or analysed. The test window is therefore 2024-01-01 to
+2025-12-31 (every exit before 2026-01-01). The committed rules in this plan are run once, unchanged, on all
+of it. The standardisation constants (gap inputs only, never outcomes) are frozen from the 2024-25 usable
+ordinary days into `src/oldnews/zref_frozen_insample.json` before any 2024-25 outcome is analysed, and
+applied unchanged to the sealed window. H1, H1b, P and H2 are reported pooled over 2024-25 as the primary
+result and separately for 2024 and 2025 as a robustness check. If Massive confirms that 2022-23 may be used,
+the original two-window design (2022-23 discovery, 2024-25 confirmation) below applies and the 2024 / 2025 split
+is kept as an extra check. Everything after this paragraph describes the rules, which do not change.
+
+
 - Discovery: filings from 2022-01-01 to 2023-12-31.
 - Confirmation: filings from 2024-01-01 to 2025-12-31, every exit before 2026-01-01, run once with
   everything below unchanged.
