@@ -61,3 +61,11 @@ with the reason and what had been looked at.
   separates the pre-entry inputs, leave-one-ticker-out and trimmed means, levels behind the difference). They are labelled
   exploratory, logged in the ledger as "diagnostic", and do not change the primary conclusion. An independent recomputation
   of the primary result and a lookahead audit are run by a separate reviewer.
+- **Independent audit passed** (`src/oldnews/audit.py`, separate code): labels, H1 and the placebo reproduce to 4 decimals;
+  no duplicate events; entry timing of all 751 events reproduces; no date outside 2024-25; trades recompute at 1x and 2x.
+  Disclosed: (1) the earnings exclusion uses earnings filings up to 5 sessions after entry, as the test plan states; earnings
+  dates are scheduled in advance, but this is information after entry and is disclosed as such; (2) the related-filing cue
+  also matches on the other filing's event date, slightly wider than the plan's wording (one placebo filing differs, no label
+  changes). The 5% trimmed difference (+0.081) is the pre-committed robustness figure; the 10% version (+0.071) is an
+  exploratory diagnostic. The trade's mean per trade is +0.121% (1x, h=10), +0.294% without its largest loss; the top 3
+  trades account for 167% of total P&L.
