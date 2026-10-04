@@ -637,6 +637,208 @@ def _log(label: str, summary: pd.DataFrame, h2_df: pd.DataFrame, metrics: pd.Dat
     ledger.append(path, pd.concat([books, tests, risk], ignore_index=True), ledger.new_run_id(), {}, _git_head())
 
 
+# ---------------------------------------------------------------- extra reported statistics (reporting only)
+#
+# Three required reporting items, computed from tables the run already wrote (trade_<label>/trades.csv,
+# classified_<label>.csv, gap_<label>.csv). They never change a trade, a test or an existing output file.
+
+EXTRA_GROUPS = {"old": "old-news events (the strategy)", "null": "matched ordinary days of the old-news events "
+                "(both rounds pooled)"}
+EXTRA_SCOPES = {"eligible": "every qualifying trade, before the 5-position cap",
+                "taken": "the trades the 5-position book takes"}
+EXTRA_NOTE = (
+    "P&L is net of costs, in % of collateral (strike x 100) per trade; costs = max(5% of premium, $0.05/share) on "
+    "entry and on exit, 2x = doubled. 95% CI = percentile bootstrap of the mean over trades "
+    f"({N_BOOT:,} draws, seed {SEED}; ordinary days resampled as independent trades although two share an event). "
+    "A horizon whose exit would need data outside the window has no usable outcome row (measure clips it), so its "
+    "n is 0 and its statistics are n/a; a 1-month put also expires before 42 and 63 sessions. "
+    f"n < {LOW_SAMPLE} is descriptive.")
+
+
+def _mean_ci(x: np.ndarray) -> tuple[float, float, float]:
+    """Mean and 95% percentile-bootstrap interval (N_BOOT draws, seed SEED); NaN when empty."""
+    if len(x) == 0:
+        return np.nan, np.nan, np.nan
+    b = _boot(lambda idx: x[idx].mean(1), len(x), np.random.default_rng(SEED))
+    return float(x.mean()), float(np.percentile(b, 2.5)), float(np.percentile(b, 97.5))
+
+
+def _prep_trades(trades: pd.DataFrame) -> pd.DataFrame:
+    t = trades.copy()
+    t["horizon"] = _horizon(t["horizon"])
+    t["taken"] = _flag(t["taken"])
+    for c in ("entry_date", "exit_date"):
+        t[c] = pd.to_datetime(t[c])
+    for c in ("put_strike", "put_premium", "csp_gross", "csp_net", "csp_net2x"):
+        t[c] = pd.to_numeric(t[c])
+    t["group"] = np.where(t["book"].eq("old"), "old", np.where(t["book"].astype(str).str.startswith("null_r"),
+                                                                "null", ""))
+    return t
+
+
+def pnl_by_horizon(trades: pd.DataFrame) -> pd.DataFrame:
+    """Net P&L per trade (% of collateral) at every fixed horizon and cost: n, mean, bootstrap 95% CI, for the
+    old-news trades and their matched ordinary days, over every eligible trade and over the trades the book takes."""
+    t = _prep_trades(trades)
+    rows = []
+    for grp in EXTRA_GROUPS:
+        for scope in EXTRA_SCOPES:
+            g = t[t["group"].eq(grp) & (t["taken"] if scope == "taken" else True)]
+            for hz in HORIZONS:
+                gh = g[g["horizon"] == hz]
+                for cost, pnl in COSTS.items():
+                    x = gh[pnl].dropna().to_numpy(float)
+                    m, lo, hi = _mean_ci(x)
+                    rows.append({"group": grp, "scope": scope, "horizon": hz, "cost": cost, "n": len(x),
+                                 "n_tickers": gh.loc[gh[pnl].notna(), "ticker"].nunique(), "mean_pct": 100 * m,
+                                 "ci_lo_pct": 100 * lo, "ci_hi_pct": 100 * hi, "descriptive": len(x) < LOW_SAMPLE})
+    return pd.DataFrame(rows)
+
+
+def cost_bps(trades: pd.DataFrame, horizon: str = HEADLINE_HORIZON) -> pd.DataFrame:
+    """Round-trip cost per old-news trade at `horizon` (entry + exit), in basis points of cash collateral
+    (strike x 100) and of the premium received: median and mean at 1x and 2x, for eligible and taken trades.
+    Per trade the cost is csp_gross - csp_net (a fraction of collateral, measure.csp_pnl)."""
+    t = _prep_trades(trades)
+    t = t[t["group"].eq("old") & (t["horizon"] == horizon)]
+    rows = []
+    for scope in EXTRA_SCOPES:
+        g = t[t["taken"]] if scope == "taken" else t
+        for cost, pnl in COSTS.items():
+            frac = (g["csp_gross"] - g[pnl]).to_numpy(float)
+            ok = np.isfinite(frac) & (g["put_premium"].to_numpy(float) > 0)
+            coll = 1e4 * frac[ok]
+            prem = coll * g["put_strike"].to_numpy(float)[ok] / g["put_premium"].to_numpy(float)[ok]
+            nan = float("nan")
+            rows.append({"scope": scope, "horizon": horizon, "cost": cost, "n": int(ok.sum()),
+                         "median_bps_collateral": float(np.median(coll)) if len(coll) else nan,
+                         "mean_bps_collateral": float(coll.mean()) if len(coll) else nan,
+                         "median_bps_premium": float(np.median(prem)) if len(prem) else nan,
+                         "mean_bps_premium": float(prem.mean()) if len(prem) else nan})
+    return pd.DataFrame(rows)
+
+
+def filing_lag(classified: pd.DataFrame, eligible_ids: set | None = None) -> pd.DataFrame:
+    """For the classified events: business days (exchange sessions, events.py's lag_bd) from the cover-page event
+    date to EDGAR acceptance (median, IQR, mean), and the share whose entry t_0 is a later session than the filing
+    date because the filing was accepted at or after the cutoff (15:30 ET, or the same margin before an early close)."""
+    c = classified[classified["kind"].eq("event")] if "kind" in classified else classified
+    subsets = {"all classified": pd.Series(True, index=c.index),
+               "people news": c["group"].eq("people"),
+               "placebo": c["group"].eq("placebo"),
+               "late people news": c["group"].eq("people") & _flag(c["late"])}
+    if eligible_ids is not None:
+        subsets["trade-eligible (late people news, earnings excluded, scored)"] = c["row_id"].isin(eligible_ids)
+    rows = []
+    for name, mask in subsets.items():
+        g = c[mask.to_numpy()]
+        lag = pd.to_numeric(g["lag_bd"], errors="coerce").dropna()
+        f, t0 = pd.to_datetime(g["filing_date"], errors="coerce"), pd.to_datetime(g["t_0"], errors="coerce")
+        both = f.notna() & t0.notna()
+        nxt = (t0 > f)[both]
+        rows.append({"subset": name, "n": len(g), "n_lag": len(lag),
+                     "median_lag_bd": float(lag.median()) if len(lag) else np.nan,
+                     "p25_lag_bd": float(lag.quantile(0.25)) if len(lag) else np.nan,
+                     "p75_lag_bd": float(lag.quantile(0.75)) if len(lag) else np.nan,
+                     "mean_lag_bd": float(lag.mean()) if len(lag) else np.nan,
+                     "n_entry_known": int(both.sum()), "n_next_session": int(nxt.sum()),
+                     "share_next_session_pct": 100 * float(nxt.mean()) if len(nxt) else np.nan})
+    return pd.DataFrame(rows)
+
+
+def _extra_md(label: str, pnl: pd.DataFrame, costs: pd.DataFrame, lag: pd.DataFrame) -> str:
+    def f(v, d=2, sign=False):
+        return "n/a" if pd.isna(v) else (f"{v:+.{d}f}" if sign else f"{v:,.{d}f}")
+
+    out = [f"# Extra reported statistics: {label}", "",
+           "Written by `trade.extra_stats` from trade_<label>/trades.csv, classified_<label>.csv and gap_<label>.csv. "
+           "Reporting only: the committed rules, nothing re-tuned. Cash-secured put, 1m bucket, strike 3% below spot, "
+           "sold at t_0 on old-news late people-news events.", "",
+           "## 1. Net P&L per trade at every horizon (% of collateral)", ""]
+    for scope, what in EXTRA_SCOPES.items():
+        p = pnl[pnl["scope"] == scope]
+        out += [f"*{scope}: {what}*", "",
+                "| horizon | cost | old n | old mean % | old 95% CI % | ordinary-day n | ordinary-day mean % | "
+                "ordinary-day 95% CI % |", "|---|---|---|---|---|---|---|---|"]
+        for (hz, cost), g in p.groupby(["horizon", "cost"], sort=False):
+            o, n = g[g["group"] == "old"].iloc[0], g[g["group"] == "null"].iloc[0]
+            ci = lambda r: "n/a" if pd.isna(r["ci_lo_pct"]) else f"[{r['ci_lo_pct']:+.2f}, {r['ci_hi_pct']:+.2f}]"  # noqa: E731
+            out.append(f"| {hz} | {cost} | {o['n']} | {f(o['mean_pct'], 2, True)} | {ci(o)} | {n['n']} | "
+                       f"{f(n['mean_pct'], 2, True)} | {ci(n)} |")
+        out.append("")
+    out += [EXTRA_NOTE, "", f"## 2. Round-trip costs, old-news trades at h = {HEADLINE_HORIZON}", "",
+            _md(costs.round(1)), "",
+            "Cost per trade = csp_gross - csp_net (entry + exit), x 10,000: in bps of cash collateral (strike x 100), "
+            "and the same dollars in bps of the premium received at entry.", "",
+            "## 3. Filing lag and entry timing", "", _md(lag), "",
+            "lag_bd = exchange sessions from the cover-page event date (inclusive) to the EDGAR acceptance date "
+            "(exclusive), as events.py computes it (late = lag_bd >= 1). Next session = the tradeable entry t_0 is a "
+            "later session than the filing date because the filing was accepted at or after the cutoff (15:30 ET, "
+            "or the same margin before an early close).", ""]
+    return "\n".join(out)
+
+
+def extra_stats(label: str, *, NB: dict | None = None, data_dir: Path = DATA, out_dir: Path | None = None,
+                log: bool = True) -> dict[str, pd.DataFrame]:
+    """Write results_<label>/extra_stats.md and extra_stats_{pnl,costs,lag}.csv from the tables the run already
+    wrote (the headline trade_<label>/trades.csv, classified_<label>.csv, gap_<label>.csv). Recomputes no trade.
+    Appends one ledger row (kind "report") per statistic family when `log`."""
+    check_label(label, NB)
+    data_dir = Path(data_dir)
+    trades = _read(data_dir / f"trade_{label}" / "trades.csv")
+    classified = _read(data_dir / f"classified_{label}.csv")
+    check_dates({"trades": trades, "classified": classified}, label, NB)
+    gap_path = data_dir / f"gap_{label}.csv"
+    ev_path = data_dir / f"events_{label}.csv"
+    eligible_ids = None
+    if ev_path.exists():
+        events = _read(ev_path)
+        check_dates({"events": events}, label, NB)
+        ev, _ = eligible_events(events, classified, "old", _read(gap_path) if gap_path.exists() else None)
+        eligible_ids = set(ev["row_id"])
+    tables = {"pnl": pnl_by_horizon(trades), "costs": cost_bps(trades), "lag": filing_lag(classified, eligible_ids)}
+    out_dir = Path(out_dir) if out_dir else data_dir / f"results_{label}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, df in tables.items():
+        df.to_csv(out_dir / f"extra_stats_{name}.csv", index=False)
+    (out_dir / "extra_stats.md").write_text(_extra_md(label, **tables), encoding="utf-8")
+    if log:
+        _log_extra(label, tables, data_dir / "ledger.csv")
+    return tables
+
+
+def _log_extra(label: str, t: dict[str, pd.DataFrame], path: Path) -> None:
+    """One ledger row per statistic family (required reporting items, not new hypotheses)."""
+    base = {"kind": "report", "subset": label, "strategy": "cash_secured_put", "bucket": BUCKET, "otm": OTM,
+            "entry": "t_0", "seed": SEED}
+    p = t["pnl"].set_index(["group", "scope", "horizon", "cost"])
+    hz = HEADLINE_HORIZON
+    c = t["costs"].set_index(["scope", "cost"])
+    lag = t["lag"].set_index("subset").iloc[0]
+    rows = [
+        {**base, "group": "pnl_by_horizon", "horizon": "all", "filter": "old-news trades and matched ordinary days",
+         "metric": f"net P&L per trade at every horizon, 1x and 2x, bootstrap 95% CI (see extra_stats_pnl.csv); here "
+                   f"h={hz}, eligible: event_mean(_2x)=old mean, null_mean=ordinary-day mean",
+         "n_sets": p.loc[("old", "eligible", hz, "1x"), "n"], "event_mean": p.loc[("old", "eligible", hz, "1x"), "mean_pct"] / 100,
+         "event_mean_2x": p.loc[("old", "eligible", hz, "2x"), "mean_pct"] / 100,
+         "null_mean": p.loc[("null", "eligible", hz, "1x"), "mean_pct"] / 100, "n_perm": N_BOOT,
+         "low_sample": bool(p.loc[("old", "eligible", hz, "1x"), "descriptive"])},
+        {**base, "group": "cost_bps", "horizon": hz, "filter": "old-news trades taken by the book",
+         "metric": "round-trip cost, median bps of collateral in event_mean(_2x), median bps of premium in "
+                   "null_mean (1x) and diff (2x); see extra_stats_costs.csv",
+         "n_sets": c.loc[("taken", "1x"), "n"], "event_mean": c.loc[("taken", "1x"), "median_bps_collateral"],
+         "event_mean_2x": c.loc[("taken", "2x"), "median_bps_collateral"],
+         "null_mean": c.loc[("taken", "1x"), "median_bps_premium"], "diff": c.loc[("taken", "2x"), "median_bps_premium"]},
+        {**base, "group": "filing_lag", "horizon": "", "strategy": "", "bucket": "", "otm": np.nan,
+         "filter": "all classified events",
+         "metric": "event date to EDGAR acceptance in sessions: median in event_mean, IQR in null_mean (p25) and "
+                   "diff (p75); share (%) entering the next session in event_mean_2x; see extra_stats_lag.csv",
+         "n_sets": lag["n"], "event_mean": lag["median_lag_bd"], "null_mean": lag["p25_lag_bd"], "diff": lag["p75_lag_bd"],
+         "event_mean_2x": lag["share_next_session_pct"]},
+    ]
+    ledger.append(path, pd.DataFrame(rows), ledger.new_run_id(), {}, _git_head())
+
+
 def _summary_md(label: str, t: dict[str, pd.DataFrame], cap: dict, bucket: str, otm: float,
                 label_col: str) -> str:
     s, hz = t["summary"], HEADLINE_HORIZON

@@ -458,9 +458,142 @@ def test_panel_and_beta():
               and "Risk, turnover and market beta" in md and "Market panel: 15 tickers" in md)
 
 
+def test_extra_stats():
+    events, nulls, outcome, labels = synthetic(n_events=60, seed=11)
+    rng = np.random.default_rng(3)
+    events["lag_bd"] = rng.integers(0, 5, len(events))
+    nxt = rng.random(len(events)) < 0.4                        # these filings enter the session after the filing date
+    days = list(DAYS)
+    events["t_0"] = [days[days.index(pd.Timestamp(f)) + 1].date() if n else f
+                     for f, n in zip(events["filing_date"], nxt)]
+    cl = events.merge(labels, on="row_id").assign(scored=True)
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        write(tmp, "insample", events, nulls, outcome)
+        cl.to_csv(tmp / "classified_insample.csv", index=False)
+        tables = trade.run("insample", data_dir=tmp, log=False)
+        before = {p.name: p.read_bytes() for p in (tmp / "trade_insample").iterdir()}
+        ex = trade.extra_stats("insample", data_dir=tmp)
+        res = tmp / "results_insample"
+        check("extra_stats writes extra_stats.md and its three CSVs",
+              all((res / f).exists() for f in ("extra_stats.md", "extra_stats_pnl.csv", "extra_stats_costs.csv",
+                                                "extra_stats_lag.csv")))
+        check("extra_stats leaves every trade table byte-identical",
+              before == {p.name: p.read_bytes() for p in (tmp / "trade_insample").iterdir()})
+        led = pd.read_csv(tmp / "ledger.csv")
+        check("one ledger row per statistic family, kind report",
+              len(led) == 3 and set(led["kind"]) == {"report"}
+              and set(led["group"]) == {"pnl_by_horizon", "cost_bps", "filing_lag"})
+
+        p = ex["pnl"]
+        check("P&L table: every group x scope x horizon x cost", len(p) == 2 * 2 * len(trade.HORIZONS) * 2
+              and set(p["horizon"]) == set(trade.HORIZONS))
+        t = tables["trades"]
+        old10 = t[(t["book"] == "old") & (t["horizon"] == "10")]
+        r = p.set_index(["group", "scope", "horizon", "cost"])
+        e1, e2 = r.loc[("old", "eligible", "10", "1x")], r.loc[("old", "eligible", "10", "2x")]
+        check("old eligible mean equals the trades' mean, CI brackets it",
+              e1["n"] == len(old10) and np.isclose(e1["mean_pct"], 100 * old10["csp_net"].mean())
+              and e1["ci_lo_pct"] <= e1["mean_pct"] <= e1["ci_hi_pct"])
+        check("2x costs lower the mean", e2["mean_pct"] < e1["mean_pct"])
+        tk = r.loc[("old", "taken", "10", "1x")]
+        check("taken scope counts only the book's trades", tk["n"] == int(old10["taken"].sum()))
+        nul10 = t[t["book"].str.startswith("null_r") & (t["horizon"] == "10")]
+        check("ordinary-day group pools both rounds", r.loc[("null", "eligible", "10", "1x"), "n"] == len(nul10))
+        clipped = trade.pnl_by_horizon(t[t["horizon"] != "63"])
+        c63 = clipped[clipped["horizon"] == "63"]
+        check("a horizon with no usable exit reports n = 0 and no mean", (c63["n"] == 0).all()
+              and c63["mean_pct"].isna().all() and "| 63 | 1x | 0 | n/a |" in trade._extra_md(
+                  "insample", clipped, ex["costs"], ex["lag"]))
+        check("bootstrap is seeded (same CI twice)", trade.pnl_by_horizon(t).equals(p))
+
+        c = ex["costs"].set_index(["scope", "cost"])
+        # synthetic 3% row: strike 97, premium 1.2, cost max(5% x 1.2, 0.05) = 0.06/share each way
+        check("cost in bps of collateral and of premium (1x)",
+              np.isclose(c.loc[("taken", "1x"), "median_bps_collateral"], 1e4 * 0.12 / 97)
+              and np.isclose(c.loc[("taken", "1x"), "median_bps_premium"], 1e4 * 0.12 / 1.2))
+        check("2x cost is double", np.isclose(c.loc[("eligible", "2x"), "mean_bps_collateral"],
+                                              2 * c.loc[("eligible", "1x"), "mean_bps_collateral"]))
+
+        lag = ex["lag"].set_index("subset")
+        a = lag.loc["all classified"]
+        check("filing lag median and IQR from lag_bd", a["n"] == len(cl)
+              and np.isclose(a["median_lag_bd"], cl["lag_bd"].median())
+              and np.isclose(a["p25_lag_bd"], cl["lag_bd"].quantile(.25))
+              and np.isclose(a["p75_lag_bd"], cl["lag_bd"].quantile(.75)))
+        check("share entering the next session", a["n_next_session"] == int(nxt.sum())
+              and np.isclose(a["share_next_session_pct"], 100 * nxt.mean()))
+        check("trade-eligible subset is reported",
+              any(s.startswith("trade-eligible") for s in lag.index))
+
+        expect_refused("extra_stats refuses a retired label", lambda: trade.extra_stats("discovery", data_dir=tmp),
+                       match="2022-2023")
+        bad = pd.read_csv(tmp / "trade_insample" / "trades.csv")
+        bad.loc[bad.index[0], "exit_date"] = "2026-01-05"
+        bad.to_csv(tmp / "trade_insample" / "trades.csv", index=False)
+        expect_refused("extra_stats refuses a trade exiting in 2026",
+                       lambda: trade.extra_stats("insample", data_dir=tmp, log=False), match="2026-01-01")
+
+
+def test_note_numbers():
+    """report.add_entry_shift patches sensitivity.csv and summary.md once; note_numbers reads the trade tables and
+    never stops a run when a part is missing."""
+    from oldnews import report as R
+
+    events, nulls, outcome, labels = synthetic(n_events=60, seed=5)
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        write(tmp, "insample", events, nulls, outcome)
+        trade.run("insample", labels, data_dir=tmp, log=False)
+        res = tmp / "results_insample"
+        res.mkdir()
+        sens = pd.DataFrame([{"dimension": "primary", "weights": "equal", "text": "full", "cutoff": 1.0, "bucket": "1m",
+                              "otm": 3, "category": "all8", "n": 10, "n_old": 4, "n_comp": 6, "effect": 0.1,
+                              "ci_lo": -0.1, "ci_hi": 0.3, "p_one_sided": 0.8, "descriptive": True, "period": "pooled"}])
+        sens.to_csv(res / "sensitivity.csv", index=False)
+        md = ["# t", "", "## Sensitivity (H1, one change at a time)", "", "| dimension | x |", "|---|---|",
+              "| primary | 1 |", "", "## By year", ""]
+        (res / "summary.md").write_text("\n".join(md), encoding="utf-8")
+        fake = sens.assign(dimension=R.ENTRY_SHIFT_DIM, effect=0.05)
+        real_row = R.entry_shift_row
+        R.entry_shift_row = lambda *a, **k: fake
+        try:
+            R.add_entry_shift("insample", tmp, log=False)
+            R.add_entry_shift("insample", tmp, log=False)              # second call: no duplicate row
+        finally:
+            R.entry_shift_row = real_row
+        s2 = pd.read_csv(res / "sensitivity.csv")
+        check("entry t0+1 row appended once to sensitivity.csv",
+              list(s2["dimension"]) == ["primary", R.ENTRY_SHIFT_DIM])
+        text = (res / "summary.md").read_text(encoding="utf-8").split("\n")
+        i = text.index("| primary | 1 |")
+        check("summary.md: row after the table, then the note line, then the next section",
+              text[i + 1].startswith("| entry t0+1 |") and text[i + 2] == ""
+              and text[i + 3] == R.ENTRY_SHIFT_NOTE.format(label="insample") and text[i + 5] == "## By year")
+
+        t = pd.read_csv(tmp / "trade_insample" / "trades.csv", dtype={"horizon": str})
+        b = t[(t["book"] == "old") & (t["horizon"] == "10") & t["taken"]]
+        r = 100 * b["csp_net"].to_numpy()
+        c = R._book_concentration(t)
+        check("book concentration: mean, mean without the largest loss, top-3 share",
+              c["n"] == len(r) and np.isclose(c["mean"], r.mean())
+              and np.isclose(c["mean_wo_worst"], np.delete(r, r.argmin()).mean())
+              and np.isclose(c["top3_share"], np.sort(r)[-3:].sum() / r.sum()))
+        nn = R.note_numbers("insample", tmp, NB={})
+        v = nn.set_index("item")["value"]
+        check("note numbers: book and beta parts read the trade tables",
+              v["trade: mean without the largest loss"] == f"{c['mean_wo_worst']:+.3f}"
+              and "trade: R^2" in v.index)
+        check("note numbers: a missing input gives n/a, not an error",
+              (nn.loc[nn["item"] == "trimmed", "value"] == "n/a").all() and "diagnostics" in set(nn["item"]))
+        R.write_note_numbers("insample", tmp, NB={})
+        check("note_numbers.md and .csv written", (res / "note_numbers.md").exists() and (res / "note_numbers.csv").exists())
+
+
 if __name__ == "__main__":
     for fn in (test_filters, test_gap_and_label_filters, test_cap, test_equity_and_metrics, test_capacity, test_h2,
-               test_window_guard, test_run_insample, test_risk_metrics, test_panel_and_beta):
+               test_window_guard, test_run_insample, test_risk_metrics, test_panel_and_beta, test_extra_stats,
+               test_note_numbers):
         print(f"--- {fn.__name__}")
         fn()
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED: ' + ', '.join(FAILS)}")

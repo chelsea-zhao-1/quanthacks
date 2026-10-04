@@ -247,7 +247,179 @@ def ledger(data: Path) -> str:
                      for i, r in by.iterrows()]))
 
 
-# ---- the document -------------------------------------------------------------------------------------------
+# ---- computed in the pipeline run (pipeline.run_oldnews calls these for every label) ------------------------
+# The functions above copy numbers. The ones below compute the few numbers the note quotes that tests.py and
+# trade.py do not write, using the committed code unchanged (tests._row, the diagnostics functions), so that the
+# notebook run reproduces them for any label. They change no existing number.
+
+ENTRY_SHIFT_DIM = "entry t0+1"
+ENTRY_SHIFT_NOTE = ("The row `entry t0+1` uses outcome_{label}_entry1.csv (entry one session after t_0, matched ordinary "
+                    "days shifted the same way); labels unchanged; added after the primary run, logged to the ledger with "
+                    "entry t_0+1.")
+SENS_COLS = ["dimension", "weights", "text", "cutoff", "bucket", "otm", "category", "n", "n_old", "n_comp", "effect",
+             "ci_lo", "ci_hi", "p_one_sided", "descriptive"]
+
+
+def _inputs(label: str, data_dir: Path, NB: dict | None):
+    """tests.Inputs from data_dir's tables through classify's window guard, labelled in memory with the frozen
+    constants exactly as tests.run and diagnostics.load label them (nothing is written)."""
+    from oldnews import classify as cl, tests as T
+
+    frames, _ = cl.load_tables(label, data_dir, NB, ("events", "nulls", "gap", "outcome"))
+    c = cl.classify(frames["events"], frames["gap"], cl.load_frozen())
+    return T.prepare(frames["events"], frames["nulls"], frames["gap"], frames["outcome"], classified=c)
+
+
+def entry_shift_row(label: str, data_dir: Path = DATA, NB: dict | None = None) -> pd.DataFrame:
+    """The H1 sensitivity row for entry one session after t_0 (test plan, "Sensitivity"): the primary spec on
+    outcome_<label>_entry1.csv, labels unchanged, the same permutations, bootstrap and seed as tests.sensitivity."""
+    from oldnews import classify as cl, tests as T
+
+    data_dir = Path(data_dir)
+    frames, _ = cl.load_tables(label, data_dir, NB, ("events", "nulls", "gap"))
+    o1 = cl.read_table(data_dir / f"outcome_{label}_entry1.csv")
+    cl.guard_dates(label, {"outcome": o1}, NB)
+    c = cl.classify(frames["events"], frames["gap"], cl.load_frozen())          # labels unchanged (frozen constants)
+    inp = T.prepare(frames["events"], frames["nulls"], frames["gap"], o1, classified=c)
+    row = {"dimension": ENTRY_SHIFT_DIM, **T._row(inp, "H1", T.N_PERM, T.N_BOOT)}
+    return pd.DataFrame([row]).assign(period="pooled")
+
+
+def _entry_shift_ledger(row: pd.Series, path: Path) -> None:
+    """The ledger row for the entry t0+1 sensitivity, in tests._log's layout with the entry marked t_0+1."""
+    from oldnews import tests as T
+    from playground import ledger as L
+
+    led = pd.DataFrame([{
+        "kind": "oldnews_" + row["test"], "level": row["weights"], "group": row["group"], "subset": row["category"],
+        "filter": f"S>={row['cutoff']:g}|entry=t0+1", "metric": row["metric"], "strategy": "", "bucket": row["bucket"],
+        "horizon": row["horizon"], "otm": row["otm"], "entry": "t_0+1", "n_sets": row["n"], "n_tickers": row["n_tickers"],
+        "event_mean": row["mean_old"], "null_mean": row["mean_comp"], "diff": row["effect"], "p_perm": row["p"],
+        "q_bh": row["q_bh"], "trimmed_diff": row["trimmed_effect"], "loto_holds": row["loto_holds"],
+        "loto_weakest": row["loto_weakest"], "loqo_holds": row["loqo_holds"], "loqo_weakest": row["loqo_weakest"],
+        "low_sample": row["descriptive"], "n_perm": row["n_perm"], "seed": row["seed"]}])
+    L.append(Path(path), led, L.new_run_id(), {}, T.git_head())
+
+
+def add_entry_shift(label: str, data_dir: Path = DATA, NB: dict | None = None, log: bool = True) -> pd.DataFrame:
+    """Append the entry t0+1 row to results_<label>/sensitivity.csv and to the sensitivity table in summary.md
+    (with one line saying where it comes from), and log it. Does nothing if the row is already there."""
+    from oldnews import tests as T
+
+    res = Path(data_dir) / f"results_{label}"
+    sens = pd.read_csv(res / "sensitivity.csv", keep_default_na=False, na_values=["", "nan", "NaN"])
+    if (sens["dimension"] == ENTRY_SHIFT_DIM).any():
+        return sens
+    row = entry_shift_row(label, data_dir, NB)
+    sens = pd.read_csv(res / "sensitivity.csv")
+    out = pd.concat([sens, row], ignore_index=True)
+    out.to_csv(res / "sensitivity.csv", index=False)
+    md = res / "summary.md"
+    if md.exists():
+        lines = md.read_text(encoding="utf-8").split("\n")
+        i = lines.index("## Sensitivity (H1, one change at a time)") + 3        # title, blank, header: rule next
+        while lines[i].startswith("|"):
+            i += 1                                                          # i: the blank line after the table
+        body = T._md(row[SENS_COLS]).split("\n")[2:]
+        lines[i:i + 1] = body + ["", ENTRY_SHIFT_NOTE.format(label=label), ""]
+        md.write_text("\n".join(lines), encoding="utf-8")
+    if log:
+        _entry_shift_ledger(row.iloc[0], Path(data_dir) / "ledger.csv")
+    return out
+
+
+def _book_concentration(trades: pd.DataFrame) -> dict:
+    """Old-news book at h = 10, trades taken, 1x costs, in % of each trade's collateral (as audit.py computes it):
+    mean, mean without the largest loss, and the three largest trades' share of the total P&L."""
+    t = trades[(trades["book"] == "old") & (trades["horizon"].astype(str) == HEADLINE_H)
+               & trades["taken"].astype(str).str.lower().isin(["true", "1"])]
+    r = 100 * pd.to_numeric(t["csp_net"]).to_numpy(float)
+    if len(r) == 0:
+        return {"n": 0, "mean": np.nan, "mean_wo_worst": np.nan, "top3_share": np.nan}
+    return {"n": len(r), "mean": r.mean(), "mean_wo_worst": np.delete(r, int(np.argmin(r))).mean() if len(r) > 1 else np.nan,
+            "top3_share": np.sort(r)[::-1][:3].sum() / r.sum() if r.sum() != 0 else np.nan}
+
+
+def note_numbers(label: str, data_dir: Path = DATA, NB: dict | None = None) -> pd.DataFrame:
+    """The note's numbers that the main tables do not print: the entry t0+1 sensitivity row, the 5% trimmed H1
+    difference, the diagnostics (kappa, MDE, leave-one-ticker-out range), the old-news book's concentration, and
+    its market beta and R^2. One row per number: item, value (formatted), detail. A part whose inputs are missing
+    or too small says so instead of stopping the run."""
+    from oldnews import diagnostics as D
+
+    data_dir = Path(data_dir)
+    res, tr = data_dir / f"results_{label}", data_dir / f"trade_{label}"
+    rows: list[dict] = []
+
+    def add(item: str, value: str, detail: str = "") -> None:
+        rows.append({"item": item, "value": value, "detail": detail})
+
+    def part(name: str, fn) -> None:
+        try:
+            fn()
+        except Exception as e:  # noqa: BLE001 (a small sealed window may leave a part empty; say why)
+            add(name, "n/a", f"{type(e).__name__}: {str(e)[:120]}")
+
+    def sens():
+        s = _read(res / "sensitivity.csv")
+        r = s[s["dimension"] == ENTRY_SHIFT_DIM]
+        if r.empty:
+            add("sensitivity entry t0+1", "n/a", "row not computed (no outcome_<label>_entry1.csv)")
+        else:
+            r = r.iloc[0]
+            add("sensitivity entry t0+1: effect", _num(r["effect"], 4, True),
+                f"95% CI {_ci(r['ci_lo'], r['ci_hi'], 4)}, one-sided p {_num(r['p_one_sided'], 4)}, "
+                f"old/comparison {_int(r['n_old'])}/{_int(r['n_comp'])}")
+        add("sensitivity settings (rows other than primary)", _int(len(s) - 1), "")
+
+    def trimmed():
+        h = _read(res / "h1.csv").iloc[0]
+        add("H1 5% trimmed difference", _num(h["trimmed_effect"], 4, True), f"untrimmed {_num(h['effect'], 4, True)}")
+
+    def diagnostics():
+        s = D.h1_sample(_inputs(label, data_dir, NB), "10")
+        d, old = s["d"].to_numpy(float), s["is_old"].to_numpy(bool)
+        pw = D.power(d, old).set_index("quantity")["value"]
+        _, agr = D.agreement(s)
+        _, inf = D.influence(s)
+        add("diagnostics: Cohen's kappa (math-only vs words-only)", _num(agr["kappa"], 3),
+            f"agreement {_num(agr['agreement'], 3)}, n {agr['n']}")
+        add("diagnostics: MDE (one-sided 5%, 80% power)", _num(pw["mde"], 4),
+            f"rules out effects below {_num(pw['rules_out_below'], 4, True)}")
+        add("diagnostics: leave-one-ticker-out range", f"{_num(inf['loto_min'], 4, True)}..{_num(inf['loto_max'], 4, True)}",
+            f"{inf['n_left_out_runs']} runs, {inf['sign_flips']} sign flips")
+
+    def book():
+        c = _book_concentration(_read(tr / "trades.csv"))
+        add("trade: mean per taken trade, h = 10, 1x (% of collateral)", _num(c["mean"], 3, True), f"n {c['n']}")
+        add("trade: mean without the largest loss", _num(c["mean_wo_worst"], 3, True), "")
+        add("trade: top-3 trades' share of total P&L", f"{_num(100 * c['top3_share'], 0)}%", "")
+
+    def beta():
+        m = _read(tr / "metrics.csv")
+        r = m[(m["book"] == "old") & (m["cost"] == "1x")].iloc[0]
+        add("trade: market beta (old-news book, h = 10, 1x)", _num(r["beta"], 3), f"R^2 {_num(r['r2'], 3)}, "
+            f"{_int(r['n_beta_days'])} days")
+        add("trade: R^2", _num(r["r2"], 3), "")
+
+    for name, fn in (("sensitivity", sens), ("trimmed", trimmed), ("diagnostics", diagnostics), ("book", book),
+                     ("beta", beta)):
+        part(name, fn)
+    return pd.DataFrame(rows)
+
+
+def write_note_numbers(label: str, data_dir: Path = DATA, NB: dict | None = None) -> str:
+    """Write results_<label>/note_numbers.md and note_numbers.csv; return the Markdown text."""
+    t = note_numbers(label, data_dir, NB)
+    res = Path(data_dir) / f"results_{label}"
+    res.mkdir(parents=True, exist_ok=True)
+    t.to_csv(res / "note_numbers.csv", index=False)
+    text = (f"## Numbers in the note: {label}\n\n" + table(t.to_dict("records"))
+            + "\nComputed by the pipeline from this run's tables with the committed code (tests._row for the "
+              "entry t0+1 row, the diagnostics functions, trade metrics). Exploratory diagnostics do not change the "
+              "primary result.\n")
+    (res / "note_numbers.md").write_text(text, encoding="utf-8")
+    return text
 def build(label: str, data: Path = DATA) -> str:
     from oldnews import pipeline
 

@@ -647,7 +647,10 @@ def measurement_rows(events: pd.DataFrame, nulls: pd.DataFrame) -> pd.DataFrame:
 
 
 def _summary(folder: Path) -> str | None:
-    f = folder / "summary.md"
+    return _read_text(folder / "summary.md")
+
+
+def _read_text(f: Path) -> str | None:
     return f.read_text(encoding="utf-8") if f.exists() else None
 
 
@@ -780,6 +783,11 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
             gap, outcome = _call(steps.measure, rows, label, NB=NB, panel_rows=panel,
                                  **({"hard_stop": stop} if stop else {}), out_dir=OUT)
         result.update(gap=gap, outcome=outcome)
+        if "entry_shift" in inspect.signature(steps.measure).parameters:    # sensitivity: entry one session after t_0
+            with restoring(NB):
+                _call(steps.measure, rows, f"{label}_entry1", NB=NB, panel_rows=panel, entry_shift=1,
+                      **({"hard_stop": stop} if stop else {}), out_dir=OUT)
+            log(f"2 measure: entry t_0+1 outcomes written to {OUT / f'outcome_{label}_entry1.csv'}")
         stages["measure"] = "ran"
         n_ok = int(flag(gap["usable"]).sum()) if "usable" in gap else 0
         log(f"2 measure: {len(gap)} gap rows ({n_ok} usable), {len(outcome)} outcome rows")
@@ -799,6 +807,11 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
             f"{int(flag(classified['old']).sum()) if 'old' in classified else '?'} labelled old news")
 
         result["tests"] = _call(steps.tests, label, data_dir=OUT, NB=NB)
+        if (OUT / f"outcome_{label}_entry1.csv").exists() and (OUT / f"results_{label}" / "sensitivity.csv").exists():
+            from oldnews import report as report_module    # the entry t0+1 sensitivity row, committed rule unchanged
+            sens = report_module.add_entry_shift(label, OUT, NB)
+            if isinstance(result["tests"], dict):
+                result["tests"]["sensitivity"] = sens
         result["tests_summary"] = _summary(OUT / f"results_{label}")
         stages["tests"] = "ran"
         log("4 tests: written to " + str(OUT / f"results_{label}"))
@@ -806,6 +819,15 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
         result["trade_summary"] = _summary(OUT / f"trade_{label}")
         stages["trade"] = "ran"
         log("5 trade: written to " + str(OUT / f"trade_{label}"))
+        if (OUT / f"trade_{label}" / "trades.csv").exists() and (OUT / f"classified_{label}.csv").exists():
+            from oldnews import trade as trade_module      # reporting only: reads the tables above, changes none
+            result["extra_stats"] = trade_module.extra_stats(label, NB=NB, data_dir=OUT)
+            result["extra_stats_summary"] = _read_text(OUT / f"results_{label}" / "extra_stats.md")
+            log("5b extra stats: written to " + str(OUT / f"results_{label}" / "extra_stats.md"))
+        if (OUT / f"results_{label}" / "h1.csv").exists() and (OUT / f"trade_{label}" / "trades.csv").exists():
+            from oldnews import report as report_module
+            result["note_numbers"] = report_module.write_note_numbers(label, OUT, NB)
+            log("5c note numbers: written to " + str(OUT / f"results_{label}" / "note_numbers.md"))
 
         if figures:
             result["figures"] = make_figures(result, NB)
@@ -862,6 +884,10 @@ def report(result: dict) -> None:
     for name in ("tests_summary", "trade_summary"):
         text = result.get(name)
         print(text if text else f"({name.replace('_', ' ')}: no summary.md written)")
+    if result.get("extra_stats_summary"):
+        print(result["extra_stats_summary"])
+    if result.get("note_numbers"):
+        print(result["note_numbers"])
 
 
 def notebook_run(start: str, end: str, label: str, allow_fetch: bool = False, NB: dict | None = None,
@@ -978,6 +1004,7 @@ def main() -> int:
     ap.add_argument("--source", default=None, help="'api' to build the inputs through the API functions")
     ap.add_argument("--allow-fetch", action="store_true", help="let the notebook's cached API functions download")
     ap.add_argument("--no-figures", action="store_true")
+    ap.add_argument("--out-dir", default=None, help="write every output here instead of data/oldnews/ (a check run)")
     ap.add_argument("--figures-only", action="store_true",
                     help="draw the figures from the tables a finished run of this label wrote; compute nothing else")
     ap.add_argument("--max-requests", type=int, default=None,
@@ -1010,7 +1037,8 @@ def main() -> int:
     if not (start and end):
         ap.error(f"--start and --end are required for label {args.label!r}")
     report(run_oldnews(start, end, args.label, allow_fetch=args.allow_fetch, NB=NB, source=args.source,
-                       max_requests=args.max_requests, figures=not args.no_figures))
+                       max_requests=args.max_requests, figures=not args.no_figures,
+                       out_dir=Path(args.out_dir) if args.out_dir else None))
     return 0
 
 
