@@ -296,7 +296,7 @@ def test_run_insample():
         write(tmp, "insample", events, nulls, outcome)
         tables = trade.run("insample", labels, data_dir=tmp)
         out = tmp / "trade_insample"
-        names = ["counts", "trades", "summary", "by_year", "by_quarter", "worst", "equity", "capacity", "h2"]
+        names = ["counts", "trades", "summary", "by_year", "by_quarter", "worst", "equity", "capacity", "h2", "metrics"]
         check("run writes every table and summary.md",
               all((out / f"{n}.csv").exists() for n in names) and (out / "summary.md").exists())
         s = tables["summary"]
@@ -329,7 +329,8 @@ def test_run_insample():
               ((used >= lo) & (used < hi)).all())
         led = pd.read_csv(tmp / "ledger.csv")
         check("every book and H2 variant logged to the ledger",
-              len(led) == len(s) // 2 + len(tables["h2"]) // 2 and set(led["kind"]) == {"trade_book", "H2"}
+              len(led) == len(s) // 2 + len(tables["h2"]) // 2 + len(tables["metrics"]) // 2
+              and set(led["kind"]) == {"trade_book", "H2", "trade_risk"}
               and (led["subset"] == "insample").all())
         md = (out / "summary.md").read_text(encoding="utf-8")
         check("summary.md: pooled 2024-25 is the primary result, by-year alongside",
@@ -359,9 +360,107 @@ def test_run_insample():
                        lambda: trade.run("insample", labels, data_dir=tmp, log=False), match="before 2024-01-01")
 
 
+def _curve_from_returns(dates, r, n_open=1):
+    wealth = np.cumprod(1 + np.asarray(r, float))
+    return pd.DataFrame({"date": dates, "closed_pct": 0.0, "mtm_pct": 100 * (wealth - 1), "n_open": n_open})
+
+
+def test_risk_metrics():
+    dates = pd.bdate_range("2024-01-02", periods=300)
+    rng = np.random.default_rng(3)
+    r = rng.normal(0.0004, 0.01, len(dates))
+    r[0] = 0.0                                                   # the first day has no prior wealth change
+    curve = _curve_from_returns(dates, r)
+    taken = _toy([d.strftime("%Y-%m-%d") for d in dates[:10:2]], [d.strftime("%Y-%m-%d") for d in dates[-10::2]],
+                 [0.02, -0.10, 0.01, 0.03, 0.0])
+    taken.loc[0, "entry_date"], taken.loc[4, "exit_date"] = dates[0], dates[-1]
+    m = trade.risk_metrics(taken, curve, "csp_net")
+    want = r.mean() / r.std(ddof=1) * np.sqrt(252)
+    check("Sharpe = mean / sd(ddof=1) x sqrt(252) of daily MTM returns", np.isclose(m["sharpe"], want),
+          f"{m['sharpe']:.3f} vs {want:.3f}")
+    years = (dates[-1] - dates[0]).days / 365.25
+    check("turnover = n_trades / 5 / years", np.isclose(m["turnover"], 5 / 5 / years))
+    check("turnover_deployed divides by average positions open", np.isclose(m["turnover_deployed"], 5 / years / 1.0))
+    check("skew of per-trade P&L (pandas)", np.isclose(m["skew_trade"], taken["csp_net"].skew()))
+    check("largest single-position loss = worst trade / 5", np.isclose(m["largest_loss_pct_book"], -2.0))
+    w = pd.Series(np.cumprod(1 + r), index=dates).resample("ME").last()
+    mret = w / w.shift(1).fillna(1.0) - 1
+    check("worst calendar month from MTM wealth", m["worst_month"] == mret.idxmin().strftime("%Y-%m")
+          and np.isclose(m["worst_month_pct"], 100 * mret.min()))
+    check("exposure: average and maximum open positions", m["avg_open"] == 1.0 and m["max_open"] == 1)
+    check("no market series -> beta blank", np.isnan(m["beta"]))
+    sparse = curve.iloc[::5]                                     # marks every 5 days: idle days carry the mark
+    d = trade.daily_returns(sparse)
+    check("daily returns fill business days and carry marks flat", len(d) == len(pd.bdate_range(sparse.date.min(), sparse.date.max()))
+          and (d["r"] == 0).sum() >= 0.7 * len(d))
+    mkt = pd.Series(rng.normal(0, 0.01, len(dates)), index=dates, name="r_mkt")
+    rb = 0.0002 + 0.5 * mkt.to_numpy()
+    rb[0] = 0.0
+    mb = trade.risk_metrics(taken, _curve_from_returns(dates, rb), "csp_net", mkt)
+    check("beta recovers a planted 0.5", abs(mb["beta"] - 0.5) < 0.02 and mb["r2"] > 0.95,
+          f"beta {mb['beta']:.3f} R2 {mb['r2']:.3f}")
+    check("alpha annualised = intercept x 252", abs(mb["alpha_ann_pct"] - 100 * 252 * 0.0002) < 1.0)
+    e = trade.risk_metrics(taken.iloc[:0], curve.iloc[:0], "csp_net", mkt)
+    check("empty book -> NaN metrics", np.isnan(e["sharpe"]) and np.isnan(e["beta"]))
+
+
+def _write_parts(folder: Path, n_tickers=15, seed=0):
+    import pickle
+    rng = np.random.default_rng(seed)
+    days = pd.bdate_range("2023-12-01", "2025-12-31")
+    series = {}
+    for k in range(n_tickers):
+        px = pd.Series(100 * np.exp(np.cumsum(rng.normal(0, 0.01, len(days)))), index=days)
+        for j, start in enumerate(range(0, len(days) - 40, 60)):
+            series[(f"T{k}", days[start])] = (f"T{k}", px.iloc[start:start + 70])
+    series[("UNPRICED", days[0])] = None                     # the measure step stores None for unpriced rows
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "part_00000.pkl").write_bytes(pickle.dumps({"per_row": {}, "series": series}))
+    return days
+
+
+def test_panel_and_beta():
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        _write_parts(tmp / "_parts_insample")
+        panel = trade.spot_panel("insample", tmp, NB={})
+        check("panel: only 2024-25 dates for insample (2023 rows dropped)",
+              panel.index.min() >= pd.Timestamp("2024-01-01") and panel.index.max() < pd.Timestamp("2026-01-01"))
+        p2 = trade.spot_panel("insample", tmp, NB={"HOLDOUT_START": "2024-06-03", "HOLDOUT_END": "2024-08-30"})
+        check("panel: dates inside the sealed window dropped",
+              not ((p2.index >= pd.Timestamp("2024-06-03")) & (p2.index <= pd.Timestamp("2024-08-30"))).any())
+        check("panel: never reads another label's parts", trade.spot_panel("holdout", tmp, NB={"RUN_HOLDOUT": True}) is None)
+        expect_refused("panel: retired labels refuse", lambda: trade.spot_panel("discovery", tmp), match="2024-2025")
+        m = trade.market_returns(panel)
+        lr = np.log(panel).diff()
+        day = m.dropna().index[5]
+        check("market return = median one-session log return, as a simple return",
+              np.isclose(m[day], np.expm1(lr.loc[day].median())))
+        few = trade.market_returns(panel.iloc[:, :trade.MARKET_MIN_TICKERS - 1])
+        check("market return blank with fewer than the minimum tickers", few.isna().all())
+
+        events, nulls, outcome, labels = synthetic(n_events=60, seed=7)
+        write(tmp, "insample", events, nulls, outcome)
+        plain = tempfile.mkdtemp()
+        write(Path(plain), "insample", events, nulls, outcome)
+        a = trade.run("insample", labels, data_dir=tmp, log=False)
+        b = trade.run("insample", labels, data_dir=Path(plain), log=False)
+        check("risk reporting never changes a trade or its P&L",
+              a["trades"].equals(b["trades"]) and a["summary"].equals(b["summary"]) and a["h2"].equals(b["h2"]))
+        mt = a["metrics"]
+        check("metrics for old and ordinary-day books at 1x and 2x",
+              {"old", "null_r1", "null_r2"} <= set(mt["book"]) and set(mt["cost"]) == {"1x", "2x"}
+              and mt["sharpe"].notna().all() and mt["beta"].notna().all())
+        check("without a panel beta is blank but Sharpe is reported",
+              b["metrics"]["beta"].isna().all() and b["metrics"]["sharpe"].notna().all())
+        md = (tmp / "trade_insample" / "summary.md").read_text(encoding="utf-8")
+        check("summary.md has the risk section and its formulas", "Sharpe = mean(r) / sd(r, ddof=1)" in md
+              and "Risk, turnover and market beta" in md and "Market panel: 15 tickers" in md)
+
+
 if __name__ == "__main__":
     for fn in (test_filters, test_gap_and_label_filters, test_cap, test_equity_and_metrics, test_capacity, test_h2,
-               test_window_guard, test_run_insample):
+               test_window_guard, test_run_insample, test_risk_metrics, test_panel_and_beta):
         print(f"--- {fn.__name__}")
         fn()
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED: ' + ', '.join(FAILS)}")

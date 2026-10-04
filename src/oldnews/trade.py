@@ -322,6 +322,111 @@ def worst_quarter(by_quarter: pd.DataFrame, book: str = "old", horizon: str = HE
     return w[["cost", "quarter", "n_trades", "total_return_pct", "hit_rate_pct", "max_dd_mtm_pct"]]
 
 
+# ---------------------------------------------------------------- risk and market beta (reporting only)
+
+MARKET_MIN_TICKERS = 10      # a day's market return needs at least this many tickers with a one-session return
+RISK_BOOKS = ("old", "null_r1", "null_r2", "all_late")
+RISK_NOTE = (
+    "Daily book returns come from the mark-to-market equity curve on the market calendar (every date with a "
+    "parity spot in the panel), from the first entry to the last exit, with idle days at 0: r_t = W_t / W_t-1 - 1, "
+    "W = 1 + equity / 100 (fixed 5-slot capital, no compounding of P&L). Sharpe = mean(r) / sd(r, ddof=1) x "
+    "sqrt(252), risk-free 0 (the collateral's cash interest is not credited either). Open puts are marked only "
+    "at the fixed horizons 1, 2, 3, 5, 10 sessions and carried flat in between, so daily volatility, Sharpe and "
+    "beta are measured on stale marks (beta and R^2 are biased towards 0). Market return: the median across "
+    "cached tickers of the one-session log return of parity spot, days with at least "
+    f"{MARKET_MIN_TICKERS} tickers, converted to a simple return; beta = OLS slope of r_book on r_mkt, alpha = "
+    "intercept x 252. Turnover = collateral opened per year / book capital (n_trades / 5 / years); "
+    "turnover_deployed divides by the average capital actually in use instead. Skew = sample skewness of "
+    "per-trade P&L (pandas, bias-adjusted). Worst month = calendar month of MTM wealth. Largest position loss = "
+    "worst trade P&L / 5, in % of book capital.")
+
+
+def spot_panel(label: str, data_dir: Path = DATA, NB: dict | None = None) -> pd.DataFrame | None:
+    """Ticker x date parity-spot panel from the measure step's cached parts (data_dir/_parts_<label>/part_*.pkl,
+    `series` = {(ticker, t_pre): (ticker, spot Series)}); the same date seen in several windows is averaged.
+    For insample only dates in [2024-01-01, 2026-01-01) outside the sealed window are kept. None if no parts."""
+    check_label(label, NB)
+    folder = Path(data_dir) / f"_parts_{label}"
+    files = sorted(folder.glob("part_*.pkl")) if folder.is_dir() else []
+    if not files:
+        return None
+    by_ticker: dict[str, list[pd.Series]] = {}
+    for f in files:
+        for item in pd.read_pickle(f)["series"].values():
+            if item is None:                                     # a row the measure step could not price
+                continue
+            tk, s = item
+            by_ticker.setdefault(tk, []).append(s)
+    panel = pd.DataFrame({tk: pd.concat(ss).groupby(level=0).mean() for tk, ss in by_ticker.items()})
+    panel.index = pd.to_datetime(panel.index)
+    panel = panel.sort_index()
+    if label == "insample":
+        h0, h1 = holdout_window(NB)
+        d = panel.index
+        panel = panel[(d >= WINDOW_START) & (d < HARD_STOP) & ~((d >= h0) & (d <= h1))]
+    return panel
+
+
+def market_returns(panel: pd.DataFrame) -> pd.Series:
+    """Equal-weight market: the median one-session log return of parity spot across tickers (only returns
+    between consecutive panel dates where the ticker has both spots), as a simple return. NaN on days with
+    fewer than MARKET_MIN_TICKERS tickers."""
+    r = np.log(panel).diff()
+    n = r.notna().sum(axis=1)
+    return np.expm1(r.median(axis=1).where(n >= MARKET_MIN_TICKERS)).rename("r_mkt")
+
+
+def daily_returns(curve: pd.DataFrame, calendar: pd.DatetimeIndex | None = None) -> pd.DataFrame:
+    """The MTM curve on a daily calendar (market dates if given, else business days) from first to last date:
+    columns r (daily book return), wealth, n_open."""
+    if curve.empty:
+        return pd.DataFrame(columns=["r", "wealth", "n_open"])
+    c = curve.set_index("date")
+    lo, hi = c.index.min(), c.index.max()
+    cal = calendar[(calendar >= lo) & (calendar <= hi)] if calendar is not None else pd.bdate_range(lo, hi)
+    days = cal.union(c.index)
+    d = c[["mtm_pct", "n_open"]].reindex(days).ffill()
+    wealth = 1 + d["mtm_pct"] / 100
+    return pd.DataFrame({"r": wealth / wealth.shift(1).fillna(1.0) - 1, "wealth": wealth, "n_open": d["n_open"]})
+
+
+def risk_metrics(taken: pd.DataFrame, curve: pd.DataFrame, pnl: str, mkt: pd.Series | None = None,
+                 max_open: int = MAX_OPEN) -> dict:
+    """Sharpe, turnover, skew, worst month, exposure and market beta of one book (see RISK_NOTE)."""
+    nan = float("nan")
+    out = dict.fromkeys(["n_days", "sharpe", "ann_vol_pct", "turnover", "turnover_deployed", "skew_trade",
+                         "worst_month", "worst_month_pct", "max_dd_mtm_pct", "avg_open", "max_open",
+                         "largest_loss_pct_book", "beta", "alpha_ann_pct", "r2", "n_beta_days"], nan)
+    out.update(worst_month="", n_trades=len(taken))
+    if taken.empty:
+        return out
+    d = daily_returns(curve, mkt.index if mkt is not None else None)
+    r = d["r"]
+    years = (taken["exit_date"].max() - taken["entry_date"].min()).days / 365.25
+    sd = r.std(ddof=1)
+    monthly = d["wealth"].resample("ME").last()
+    m_ret = monthly / monthly.shift(1).fillna(1.0) - 1
+    avg_open = float(d["n_open"].mean())
+    out.update(n_days=len(r), sharpe=r.mean() / sd * np.sqrt(252) if sd > 0 else nan,
+               ann_vol_pct=100 * sd * np.sqrt(252),
+               turnover=len(taken) / max_open / years if years > 0 else nan,
+               turnover_deployed=len(taken) / years / avg_open if years > 0 and avg_open > 0 else nan,
+               skew_trade=float(taken[pnl].skew()) if len(taken) > 2 else nan,
+               worst_month=m_ret.idxmin().strftime("%Y-%m"), worst_month_pct=100 * float(m_ret.min()),
+               max_dd_mtm_pct=max_drawdown(curve["mtm_pct"]), avg_open=avg_open, max_open=int(d["n_open"].max()),
+               largest_loss_pct_book=100 * float(taken[pnl].min()) / max_open)
+    if mkt is not None:
+        j = pd.concat([r.rename("r"), mkt], axis=1, join="inner").dropna()
+        if len(j) > 2 and j["r_mkt"].var() > 0:
+            X = np.column_stack([np.ones(len(j)), j["r_mkt"].to_numpy()])
+            (a, b), *_ = np.linalg.lstsq(X, j["r"].to_numpy(), rcond=None)
+            resid = j["r"].to_numpy() - X @ np.array([a, b])
+            tss = ((j["r"] - j["r"].mean()) ** 2).sum()
+            out.update(beta=float(b), alpha_ann_pct=100 * 252 * float(a), n_beta_days=len(j),
+                       r2=float(1 - (resid ** 2).sum() / tss) if tss > 0 else nan)
+    return out
+
+
 # ---------------------------------------------------------------- capacity
 
 def capacity(taken: pd.DataFrame) -> pd.DataFrame:
@@ -454,10 +559,13 @@ def run(label: str, labels: pd.DataFrame | None = None, *, NB: dict | None = Non
 
     trades["taken"] = False
     summary, years, quarters, worst_rows, curves = [], [], [], [], []
+    books_taken: dict[str, tuple[pd.DataFrame, pd.DataFrame]] = {}
     for (book, hz), g in trades.groupby(["book", "horizon"], sort=False):
         trades.loc[g.index, "taken"] = simulate(g)
         tk = trades.loc[g.index][trades.loc[g.index, "taken"]]
         mk = marks[marks["row_id"].isin(tk["row_id"])]
+        if hz == HEADLINE_HORIZON:
+            books_taken[book] = (tk, mk)
         for cost, pnl in COSTS.items():
             key = {"book": book, "horizon": hz, "cost": cost}
             curve = equity(tk, mk, pnl)
@@ -476,22 +584,29 @@ def run(label: str, labels: pd.DataFrame | None = None, *, NB: dict | None = Non
     cap = capacity(head)
     h2_df = h2(trades)
 
+    panel = spot_panel(label, data_dir, NB)                    # reporting only: never changes a trade
+    mkt = market_returns(panel) if panel is not None else None
+    metrics = pd.DataFrame([{"book": b, "horizon": HEADLINE_HORIZON, "cost": cost,
+                             **risk_metrics(books_taken[b][0], equity(*books_taken[b], pnl), pnl, mkt)}
+                            for b in RISK_BOOKS if b in books_taken for cost, pnl in COSTS.items()])
+    metrics["market_panel_tickers"] = 0 if panel is None else panel.shape[1]
+
     headline = (bucket, float(otm), label_col) == (BUCKET, OTM, "old")
     out_dir = out_dir or data_dir / (f"trade_{label}" if headline else f"trade_{label}_{bucket}_otm{otm:g}_{label_col}")
     out_dir.mkdir(parents=True, exist_ok=True)
     tables = {"counts": counts, "trades": trades, "summary": summary, "by_year": years, "by_quarter": quarters, "worst": worst_df,
-              "equity": curves, "capacity": cap, "h2": h2_df}
+              "equity": curves, "capacity": cap, "h2": h2_df, "metrics": metrics}
     for name, df in tables.items():
         df.to_csv(out_dir / f"{name}.csv", index=False)
     (out_dir / "summary.md").write_text(_summary_md(label, tables, capacity_summary(cap), bucket, otm, label_col),
                                         encoding="utf-8")
     if log:
-        _log(label, summary, h2_df, bucket, otm, label_col, data_dir / "ledger.csv")
+        _log(label, summary, h2_df, metrics, bucket, otm, label_col, data_dir / "ledger.csv")
     return tables
 
 
-def _log(label: str, summary: pd.DataFrame, h2_df: pd.DataFrame, bucket: str, otm: float, label_col: str,
-         path: Path) -> None:
+def _log(label: str, summary: pd.DataFrame, h2_df: pd.DataFrame, metrics: pd.DataFrame, bucket: str, otm: float,
+         label_col: str, path: Path) -> None:
     """Append every book and H2 variant to the test ledger (CLAUDE.md rule 13)."""
     base = {"subset": label, "strategy": "cash_secured_put", "bucket": bucket, "otm": otm, "entry": "t_0",
             "filter": f"late people news, earnings excluded, usable, put volume > 0, label={label_col}",
@@ -512,7 +627,14 @@ def _log(label: str, summary: pd.DataFrame, h2_df: pd.DataFrame, bucket: str, ot
                            "q_bh": r["q_bh"], "event_mean_2x": t2.loc[(c, hz), "old_mean_pct"] / 100,
                            "diff_2x": t2.loc[(c, hz), "diff_pct"] / 100, "low_sample": r["descriptive"],
                            "n_perm": N_BOOT} for (c, hz), r in t1.iterrows()])
-    ledger.append(path, pd.concat([books, tests], ignore_index=True), ledger.new_run_id(), {}, _git_head())
+    m1 = metrics[metrics["cost"] == "1x"].set_index("book")
+    m2 = metrics[metrics["cost"] == "2x"].set_index("book")
+    risk = pd.DataFrame([{**base, "kind": "trade_risk", "group": b, "horizon": HEADLINE_HORIZON,
+                          "metric": "daily MTM Sharpe in event_mean(_2x), market beta in diff(_2x); see metrics.csv",
+                          "n_sets": r["n_trades"], "event_mean": r["sharpe"], "event_mean_2x": m2.loc[b, "sharpe"],
+                          "diff": r["beta"], "diff_2x": m2.loc[b, "beta"], "low_sample": r["n_trades"] < LOW_SAMPLE}
+                         for b, r in m1.iterrows()])
+    ledger.append(path, pd.concat([books, tests, risk], ignore_index=True), ledger.new_run_id(), {}, _git_head())
 
 
 def _summary_md(label: str, t: dict[str, pd.DataFrame], cap: dict, bucket: str, otm: float,
@@ -555,6 +677,13 @@ def _summary_md(label: str, t: dict[str, pd.DataFrame], cap: dict, bucket: str, 
         f"## Stress, h = {hz}: worst calendar quarter (by entry quarter) and five worst trades", _md(wq), "",
         f"Five worst old-news trades, 1x costs:", _md(w), "",
         f"## H2 at h = {hz}, {period} (every eligible trade, before the cap; prediction: positive)", _md(h), "",
+        f"## Risk, turnover and market beta, h = {hz}, {period}", _md(t["metrics"][[
+            "book", "cost", "n_trades", "sharpe", "ann_vol_pct", "max_dd_mtm_pct", "worst_month", "worst_month_pct",
+            "skew_trade", "turnover", "turnover_deployed", "avg_open", "max_open", "largest_loss_pct_book", "beta",
+            "alpha_ann_pct", "r2", "n_beta_days"]]), "",
+        RISK_NOTE + (" No market panel was found, so beta is blank."
+                     if (t["metrics"]["market_panel_tickers"] == 0).all() else
+                     f" Market panel: {int(t['metrics']['market_panel_tickers'].max())} tickers."), "",
         f"## Capacity (10% of entry-day put volume), old-news trades taken at h = {hz}",
         _md(pd.DataFrame([cap])), "",
         "`book_at_median_usd` = 5 slots x the median per-trade capacity: the book size at which half the "
