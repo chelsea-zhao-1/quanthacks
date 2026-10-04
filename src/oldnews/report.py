@@ -380,8 +380,14 @@ def note_numbers(label: str, data_dir: Path = DATA, NB: dict | None = None) -> p
         s = D.h1_sample(_inputs(label, data_dir, NB), "10")
         d, old = s["d"].to_numpy(float), s["is_old"].to_numpy(bool)
         pw = D.power(d, old).set_index("quantity")["value"]
-        _, agr = D.agreement(s)
+        agr_t, agr = D.agreement(s)
         _, inf = D.influence(s)
+        n_old = int(agr_t["of_which_primary_old"].sum())
+        math_sur = int(agr_t.loc[agr_t["math_only"] == "surprise", "of_which_primary_old"].sum())
+        add("diagnostics: old calls that math alone calls surprise", f"{math_sur} of {n_old}",
+            "primary equal-weight old labels whose math-only label (M >= 1) is surprise")
+        add("diagnostics: events per group to detect 0.10", _int(pw["n_per_group_for_0.10"]),
+            f"one-sided 5%, 80% power; for 0.20: {_int(pw['n_per_group_for_0.20'])}")
         add("diagnostics: Cohen's kappa (math-only vs words-only)", _num(agr["kappa"], 3),
             f"agreement {_num(agr['agreement'], 3)}, n {agr['n']}")
         add("diagnostics: MDE (one-sided 5%, 80% power)", _num(pw["mde"], 4),

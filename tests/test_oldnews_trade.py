@@ -586,6 +586,24 @@ def test_note_numbers():
               and "trade: R^2" in v.index)
         check("note numbers: a missing input gives n/a, not an error",
               (nn.loc[nn["item"] == "trimmed", "value"] == "n/a").all() and "diagnostics" in set(nn["item"]))
+        # the diagnostics part on a stand-in sample: 35 of 45 old calls are math-only surprise; power n from D.power
+        from oldnews import diagnostics as D
+        rng = np.random.default_rng(1)
+        mo = np.r_[np.ones(10), np.zeros(136)].astype(bool)
+        wo = np.r_[np.ones(8), np.zeros(2), np.ones(60), np.zeros(76)].astype(bool)
+        po = np.r_[np.ones(10), np.ones(35), np.zeros(25), np.zeros(76)].astype(bool)
+        samp = pd.DataFrame({"d": rng.normal(0, 0.5, 146), "is_old": po, "ticker": [f"T{i % 9}" for i in range(146)],
+                             "old_math_only_1": mo, "old_words_only_1": wo})
+        real_inp, real_s = R._inputs, D.h1_sample
+        R._inputs, D.h1_sample = (lambda *a, **k: None), (lambda *a, **k: samp)
+        try:
+            v2 = R.note_numbers("insample", tmp, NB={}).set_index("item")["value"]
+        finally:
+            R._inputs, D.h1_sample = real_inp, real_s
+        need = D.power(samp["d"].to_numpy(), po).set_index("quantity")["value"]["n_per_group_for_0.10"]
+        check("note numbers: old calls that math alone calls surprise, and n per group for 0.10",
+              v2["diagnostics: old calls that math alone calls surprise"] == "35 of 45"
+              and v2["diagnostics: events per group to detect 0.10"] == f"{int(need):,}")
         R.write_note_numbers("insample", tmp, NB={})
         check("note_numbers.md and .csv written", (res / "note_numbers.md").exists() and (res / "note_numbers.csv").exists())
 
