@@ -88,3 +88,7 @@ with the reason and what had been looked at.
 - A human (Sadie, SADIES COMPUTER) gave the GO at about 00:55 ET and switches `RUN_OOS` on herself. Everything is frozen:
   hypothesis, test plan, frozen 2024-25 constants (5bbfd9d), code. The run happens once; its result is reported whatever it
   shows, and nothing is changed afterwards. `RUN_OOS` is switched back off in the shipped notebook after the run.
+- **Disclosure: the earlier dry run of the judges' path** (before the data rule was known) used 2023-07-01..2023-12-31 on
+  the discarded 2022-23 setup. That window overlaps July and August of the notebook's sealed placeholder (2023-06-01..
+  2023-08-31). Its outputs were archived unused and never informed any 2024-25 or 2026 choice; its ledger rows (label
+  dryrun) are kept for disclosure. The judges set their own sealed dates; if they keep the placeholder, this overlap applies.
