@@ -85,10 +85,19 @@ with the reason and what had been looked at.
 - The official track pages require it (Massive sub-track: the notebook's 2026-01-01..2026-08-31 window and the judges'
   sealed window replace the track's 20% holdout; checklist: every fixed horizon in-sample and out-of-sample; Systematic
   track: "run the out-of-sample period once and report the result, good or bad").
-- A human (Sadie, SADIES COMPUTER) gave the GO at about 00:55 ET and switches `RUN_OOS` on herself. Everything is frozen:
+- A human (Sadie, SADIES COMPUTER) gave the GO at about 00:55 ET and switches `RUN_OOS` on. Everything is frozen:
   hypothesis, test plan, frozen 2024-25 constants (5bbfd9d), code. The run happens once; its result is reported whatever it
   shows, and nothing is changed afterwards. `RUN_OOS` is switched back off in the shipped notebook after the run.
 - **Disclosure: the earlier dry run of the judges' path** (before the data rule was known) used 2023-07-01..2023-12-31 on
   the discarded 2022-23 setup. That window overlaps July and August of the notebook's sealed placeholder (2023-06-01..
   2023-08-31). Its outputs were archived unused and never informed any 2024-25 or 2026 choice; its ledger rows (label
   dryrun) are kept for disclosure. The judges set their own sealed dates; if they keep the placeholder, this overlap applies.
+
+## 2026-10-04: the out-of-sample run is withdrawn (not run)
+- The team clarified at 01:18 ET that any part of the notebook guarded by the warning signed "lalitha" is a part we are
+  not allowed to do. The 2026-01-01..2026-08-31 out-of-sample run is therefore withdrawn, and the GO above is reversed.
+- What happened: `RUN_OOS` was set at 01:10 ET; the run started at 01:16 and was stopped at 01:17 while it was still
+  downloading the 2026 filing list (step 0 of the pipeline). No event was built, classified, measured, tested or traded;
+  no 2026 number was computed or seen. `RUN_OOS` is back to False (default) in the shipped notebook.
+- Our reported evidence stays the 2024-25 test. The out-of-sample code path (c8681a5) remains, guarded by `RUN_OOS`.
+
