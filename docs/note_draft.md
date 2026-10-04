@@ -18,7 +18,7 @@ Filings from 2024-01-01 to 2025-12-31, pooled, each year a check; spot from ATM 
 
 ## 3. Result
 
-Of 410 filings, 286 were late, 271 clear of earnings and 146 usable: 45 old, 101 surprise, 59 tickers.
+Of 410 filings, 286 were late, 271 clear of earnings and 146 usable: 45 old, 101 surprise.
 
 H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0.2621), one-sided p = 0.8615; 2024 +0.0263, 2025 +0.1636. H1b has the predicted sign without significance: −0.0364 (−0.1435 to +0.0708), p = 0.2546. The placebo shows no difference: +0.0990 (−0.1092 to +0.3081), two-sided p = 0.4013. No horizon survives the correction. The pre-committed 5% trimmed difference is +0.0811. An independent reimplementation reproduced H1 and found no lookahead in entry timing.
 
@@ -40,18 +40,17 @@ H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0
 
 *Table 1. H1 by horizon, 1-month bucket; 33 events at 21 sessions, none at 42 or 63 (past expiry). 2026: one-time run, pending.*
 
-**Sensitivity** (23 one-at-a-time settings: weights, cutoff, bucket, strike, category, text source; grid in the notebook): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. Entry session `t_0 + 1`: {{sens_entry1}}.
+**Sensitivity** (24 one-at-a-time settings: weights, cutoff, bucket, strike, category, text source, entry session; grid in the notebook): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. Entering one session later gives +0.0388 (−0.1354 to +0.2129), p = 0.6681 (47 old, 86 surprise).
 
 **Exploratory diagnostics** (after the result): the minimum detectable effect is 0.2109 (80% power); the null rules out a true effect below −0.0429 but not a small negative one. Leaving out each of 59 tickers never flips the sign (+0.0553 to +0.1173).
 
 ## 4. What would break it
 
 - **Classifier.** Math and word labels barely agree (Cohen's kappa 0.097), and 35 of 45 old calls are events the math alone calls surprise.
-- **Private event date.** The cover-page date is the company's, not when the market heard.
-- **Selection.** Late filing is a choice; the universe is today's top 100.
+- **Event date and selection.** The cover-page date is the company's, not when the market heard; late filing is a choice; the universe is today's top 100.
 - **Information after entry.** Constants use later 2024-25 gap inputs (never outcomes); the earnings exclusion looks up to 5 sessions past entry, at scheduled dates whose filings come later.
-- **Thin options.** Weekly 1-month expiries miss sessions; 16 gap-start marks are 1 to 3 sessions old; closes are not quotes; parity ignores dividends.
-- **Sealed window.** We predict no detectable old-versus-surprise difference. Thin option coverage there may leave fewer than 30 events, and the result is then labelled descriptive.
+- **Thin options.** Weekly 1-month expiries miss sessions; 16 gap-start marks are 1 to 3 sessions old; parity ignores dividends.
+- **Sealed window.** We predict no detectable old-versus-surprise difference. If thin option coverage leaves fewer than 30 events, the result is labelled descriptive.
 
 ## 5. How to trade it
 
@@ -70,7 +69,6 @@ Delete this section before submission. `RN` = `data/oldnews/README_numbers.md` (
 | Placeholder | Source |
 |---|---|
 | `{{oos_h}}` (h = 1, 2, 3, 5, 10, 21, 42, 63, exp) | `data/oldnews/results_oos/profile.csv`, rows `test` = H1: `effect` (`ci_lo`, `ci_hi`). Only after a human runs the one-time 2026 test; otherwise delete the column and say 2026 was not run |
-| `{{sens_entry1}}` | coordinator: H1 at h = 10 with entry at `t_0 + 1` (effect, 95% CI, one-sided p), from the entry-shift run. Also check that the "23 settings, 7 negative" count still describes the grid without it. |
 | (no others besides `{{oos_h}}`) | The diagnostics placeholders are filled below. No file gives the trade mean without its most influential trade, so the note states only the mean trade against the C loss. |
 
 **Filled from the exploratory diagnostics** (`D` = `data/oldnews/results_insample/diagnostics/`, run `20261003T223046-a26cb6`, git `2a67f5b61a`)
@@ -94,8 +92,8 @@ Delete this section before submission. `RN` = `data/oldnews/README_numbers.md` (
 | P +0.0990, −0.1092, +0.3081, two-sided p 0.4013 | RN §3 (P row) |
 | Table 1: n, effect, 95% CI, q per horizon | RN §4, H1 table (`results_insample/profile.csv`) |
 | Figure 1 | `data/oldnews/figures/insample/fade_curve.png` |
-| 23 settings, 7 negative, −0.1150 to +0.1536, smallest p 0.1999 | RN §5 (23 rows counted; negatives: math_only ×3, math_heavy ×3, excerpt equal) |
-| `t_0 + 1` not computed | RS "Not computed here" |
+| 24 settings, 7 negative, −0.1150 to +0.1536, smallest p 0.1999 | `results_insample/sensitivity.csv` (24 rows counted, modified 2026-10-03 23:50; negatives: math_only ×3, math_heavy ×3, excerpt equal; RN §5 shows the first 23) |
+| entry `t_0 + 1`: +0.0388 (−0.1354, +0.2129), p 0.6681, 47 old, 86 surprise | `results_insample/sensitivity.csv`, row `dimension` = "entry t0+1": `effect`, `ci_lo`, `ci_hi`, `p_one_sided`, `n_old`, `n_comp` |
 | 16 stale gap-start marks | RS "Coverage" (`results_insample/coverage.csv`, `people`) |
 | +1.19%, −4.68%, −0.84% (old book, h = 10) | RN §6 "Books at h = 10" |
 | H2 −0.09 (−0.86, +0.64) | RN §6 H2 table (1x rows) |
