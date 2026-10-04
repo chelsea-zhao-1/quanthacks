@@ -826,8 +826,8 @@ def spot_path(NB: dict, row: pd.Series, before: int = 5, after: int = 21, bucket
     return measure.spot_path(pe, days).rename("spot")
 
 
-WALK_NOTE = ("Illustrative filing, chosen without looking at outcomes: old news, all three math inputs, "
-             "median gap length.")
+WALK_NOTE = ("One illustrative filing, not evidence: chosen without looking at outcomes (old news, all three math "
+             "inputs, median gap length).")
 
 
 def make_figures(result: dict, NB: dict | None, show: bool = False) -> dict[str, Path]:
@@ -840,6 +840,7 @@ def make_figures(result: dict, NB: dict | None, show: bool = False) -> dict[str,
         raise ValueError("figures need the stats module's horizon profile (results_<label>/profile.csv)")
     data = F.Inputs(profile=tests["profile"], classified=result["classified"], outcome=F.primary_rows(result["outcome"]),
                     nulls=result["nulls"])
+    F.attach_files(data, OUT, result["label"])      # profile_by_year.csv and the trade tables, if the run wrote them
     walk = None
     if NB is not None:
         for _, row in F.walkthrough_candidates(data.classified, data.outcome, data.nulls).head(5).iterrows():
