@@ -5,15 +5,22 @@ close before EDGAR acceptance), so the label never looks ahead:
 
 - M is the mean of the AVAILABLE standardised inputs among three: gap move (required), implied-volatility
   change over the gap, and log(option volume in the gap / its recent average). Each input is standardised with
-  FROZEN constants (mean and standard deviation of that input over the usable discovery-window ordinary days;
-  gap inputs only, never outcomes), computed once by `freeze` into src/oldnews/zref_frozen.json and applied
-  unchanged to every window, so no event is standardised with data from after its own entry outside discovery.
-  `run` and `classify` only read that file and refuse without it.
+  FROZEN constants (mean and standard deviation of that input over the usable 2024-25 ordinary days; gap inputs
+  only, never outcomes), computed once by `freeze` into src/oldnews/zref_frozen_insample.json and applied
+  unchanged to every event of every label (insample, holdout, oos), so no event is standardised with data from
+  after its own entry. `run` and `classify` only read that file and refuse without it. The older 2022-23
+  constants (src/oldnews/zref_frozen.json) are retired: no label can load them, only a test can read them, as an
+  explicit read-only archive.
 - T is the number of word cues present (0 to 3), computed by the events agent.
 - S = w_m * M + w_t * T for each of the five fixed weight sets; old news if S >= cutoff.
 
 An event is "scored" only when its gap move exists and T is finite; the others are counted with the reason. The same scored sample is used
 for every weight set, so the sensitivity rows differ only in the rule, never in the sample.
+
+Window guard (starter notebook cells 10 and 48; .claude/ctx/06_window_guard.md): label "insample" only uses dates in
+[2024-01-01, 2026-01-01) outside the notebook's sealed HOLDOUT_START..HOLDOUT_END; "discovery" and "dryrun" are
+retired and refuse; "holdout" runs only when RUN_HOLDOUT is True; "oos" only when RUN_OOS is True. Nothing
+reads data/oldnews/_unused_2022_23/.
 """
 from __future__ import annotations
 
@@ -40,12 +47,19 @@ PRIMARY_WEIGHTS, PRIMARY_CUTOFF = "equal", 1.0
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data" / "oldnews"
-FROZEN_PATH = ROOT / "src" / "oldnews" / "zref_frozen.json"     # committed; written only by freeze()
-DISCOVERY_END = pd.Timestamp("2024-01-01")       # discovery and the dry run: no entry-side date on or after this
+FROZEN_PATH_INSAMPLE = ROOT / "src" / "oldnews" / "zref_frozen_insample.json"   # the constants every label uses; written only by freeze()
+FROZEN_PATH = FROZEN_PATH_INSAMPLE                                                # name other modules use for "the constants file"
+ARCHIVE_PATH = ROOT / "src" / "oldnews" / "zref_frozen.json"                      # RETIRED 2022-23 constants: archive, read-only
+ZREF_SOURCES = ("insample",)
+WINDOW_START = pd.Timestamp("2024-01-01")        # first day of the in-sample window (options history starts here)
 HARD_STOP = pd.Timestamp("2026-01-01")           # nothing is ever computed on or after this day (rule 8)
-ENTRY_CAPS = {"discovery": DISCOVERY_END, "dryrun": DISCOVERY_END, "insample": HARD_STOP}    # as pipeline.WINDOWS
-DEFAULT_CAP = DISCOVERY_END                      # any other label gets discovery dates only (pipeline.DEFAULT_RULES)
-GATED = ("holdout", "oos")                       # no date cap here; the pipeline runs them only behind RUN_HOLDOUT / RUN_OOS
+HOLDOUT_PLACEHOLDER = (pd.Timestamp("2023-06-01"), pd.Timestamp("2023-08-31"))    # the notebook's sealed placeholder
+RETIRED = ("discovery", "dryrun")
+RETIRED_MSG = ("2022-2023 is outside the allowed 2024-2025 window and overlaps the sealed placeholder "
+               "(2023-06-01..2023-08-31)")
+RETIRED_ZREF_MSG = ("the constants frozen on 2022-23 (src/oldnews/zref_frozen.json) are retired: 2022-2023 is outside the "
+                    "allowed 2024-2025 window. Use zref_frozen_insample.json")
+SWITCHES = {"holdout": "RUN_HOLDOUT", "oos": "RUN_OOS"}     # labels that run only when the notebook switch is on
 ENTRY_COLS = ("filing_date", "gap_start", "t_pre", "t_0", "entry_date")
 EXIT_COL = "exit_date"
 ID_COLS = {"row_id": str, "event_row_id": str, "ticker": str, "accession_number": str}
@@ -69,52 +83,82 @@ def old_col(weights: str, cutoff: float) -> str:
     return f"old_{weights}_{cutoff:g}"
 
 
-def entry_cap(label: str) -> pd.Timestamp | None:
-    """The first day no entry-side date may reach; None for the gated labels (holdout, oos)."""
-    return None if label in GATED else ENTRY_CAPS.get(label, DEFAULT_CAP)
+# ---- the window guard --------------------------------------------------------------------------------------
+def _namespace(NB: dict | None) -> dict:
+    """The notebook namespace (RUN_HOLDOUT, RUN_OOS, HOLDOUT_START, ...): NB if given, else the running `__main__`."""
+    return NB if NB is not None else vars(sys.modules["__main__"])
 
 
-def guard_dates(label: str, frames: dict[str, pd.DataFrame], NB: dict | None = None) -> pd.Timestamp | None:
-    """Hard rules on dates, the same as pipeline.WINDOWS and trade.check_dates.
+def check_label(label: str, NB: dict | None = None) -> None:
+    """Refuse a label before anything is read. discovery and dryrun are retired; holdout needs RUN_HOLDOUT True
+    and oos needs RUN_OOS True in the notebook namespace; insample is allowed (its dates are checked by
+    `guard_dates`); any other label is refused."""
+    if label in RETIRED:
+        raise PermissionError(RETIRED_MSG)
+    if label == "insample":
+        return
+    if label in SWITCHES:
+        if _namespace(NB).get(SWITCHES[label]) is not True:
+            who = "the judges set" if label == "holdout" else "a human sets"
+            raise PermissionError(f"label {label!r} runs only after {who} {SWITCHES[label]} = True (section 2)")
+        return
+    raise PermissionError(f"unknown label {label!r}; allowed: insample, holdout (RUN_HOLDOUT), oos (RUN_OOS)")
 
-    discovery and dryrun: refuse any filing, gap-start, t_pre, t_0 or entry date on or after 2024-01-01.
-    insample: the same for 2026-01-01. Any other label: as discovery. For all of these, a usable exit on or after
-    2026-01-01 is refused as well. holdout: allowed (the judges' sealed window; the pipeline runs it only after
-    they set RUN_HOLDOUT). oos: refused unless the notebook namespace `NB` (default: the running notebook's
-    namespace, `__main__`) has RUN_OOS is True. Returns the entry cap used (None for holdout and oos)."""
-    if label == "oos":
-        ns = NB if NB is not None else vars(sys.modules["__main__"])
-        if ns.get("RUN_OOS") is not True:
-            raise PermissionError("the out-of-sample window runs only after a human sets RUN_OOS = True (section 2)")
-    cap = entry_cap(label)
-    if cap is None:
+
+def holdout_window(NB: dict | None = None) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """HOLDOUT_START..HOLDOUT_END from the notebook namespace, else the placeholder 2023-06-01..2023-08-31."""
+    ns = _namespace(NB)
+    start, end = ns.get("HOLDOUT_START"), ns.get("HOLDOUT_END")
+    if start is None or end is None:
+        return HOLDOUT_PLACEHOLDER
+    return pd.Timestamp(start), pd.Timestamp(end)
+
+
+def window(label: str) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """The date range [start, stop) every date of the label must lie in; None for holdout and oos (no date cap
+    here, the label itself is switched)."""
+    return (WINDOW_START, HARD_STOP) if label == "insample" else None
+
+
+def guard_dates(label: str, frames: dict[str, pd.DataFrame | None], NB: dict | None = None) -> tuple | None:
+    """Hard stop before any computation, the same rules as trade.check_dates.
+
+    The label is checked first (`check_label`). For "insample", every date used (filing_date, gap_start, t_pre,
+    t_0, entry_date, and the exit_date of every usable row) must lie in [2024-01-01, 2026-01-01) and outside
+    HOLDOUT_START..HOLDOUT_END (the notebook's, else the placeholder). holdout and oos have no date cap.
+    Returns the window used, or None."""
+    check_label(label, NB)
+    if label != "insample":
         return None
+    h0, h1 = holdout_window(NB)
     for name, df in frames.items():
         if df is None:
             continue
-        for col in ENTRY_COLS:
-            if col in df.columns and (pd.to_datetime(df[col], errors="coerce") >= cap).any():
-                d = pd.to_datetime(df[col], errors="coerce")
-                raise PermissionError(f"{name}.{col} has dates on or after {cap.date()} "
-                                      f"(latest {d.max().date()}); refusing to compute for label {label!r}")
-        if EXIT_COL in df.columns:
-            late = pd.to_datetime(df[EXIT_COL], errors="coerce") >= HARD_STOP
-            if "usable" in df.columns:
-                late &= as_bool(df["usable"])
-            if late.any():
-                raise PermissionError(f"{name} has usable exits on or after {HARD_STOP.date()}; "
-                                      f"refusing to compute for label {label!r}")
-    return cap
+        for col in (*ENTRY_COLS, EXIT_COL):
+            if col not in df.columns:
+                continue
+            d = pd.to_datetime(df[col], errors="coerce")
+            if col == EXIT_COL and "usable" in df.columns:
+                d = d.where(as_bool(df["usable"]))                  # an unusable row's exit is never used
+            for bad, why in ((d < WINDOW_START, f"before {WINDOW_START.date()}"),
+                             (d >= HARD_STOP, f"on or after {HARD_STOP.date()}"),
+                             ((d >= h0) & (d <= h1), f"inside the sealed window {h0.date()}..{h1.date()}")):
+                if bad.any():
+                    raise PermissionError(f"{name}.{col} has {int(bad.sum())} dates {why}; refusing to run "
+                                          f"label {label!r} (allowed: {WINDOW_START.date()}..{HARD_STOP.date()}, exclusive)")
+    return WINDOW_START, HARD_STOP
 
 
 def restrict(label: str, tables: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
-    """Drop, and count, everything that enters on or after the label's entry cap, so the guard never has to fail
-    on a legitimate window edge: events whose t_0 is on or after the cap (a filing accepted late on the last
-    day enters the next session), ordinary days whose own dates reach it, and every row of the dropped ids.
-    Returns the remaining tables and a count table (`what`, `n`). Gated labels keep everything."""
-    cap = entry_cap(label)
-    if cap is None:
+    """Drop, and count, what enters on or after the end of the window (2026-01-01), so the guard never has to
+    fail on a legitimate edge: events whose t_0 is on or after it (a filing accepted late on the last day enters
+    the next session), ordinary days whose own dates reach it, and every row of the dropped ids. Dates before
+    2024-01-01 or inside the sealed window are NOT dropped: the guard refuses them. Returns the remaining tables
+    and a count table (`what`, `n`). holdout and oos keep everything."""
+    win = window(label)
+    if win is None:
         return dict(tables), pd.DataFrame({"what": [], "n": []})
+    cap = win[1]
     ev, nl = tables["events"], tables["nulls"]
     gone_ev = pd.to_datetime(ev["t_0"], errors="coerce") >= cap
     gone_nl = nl["event_row_id"].isin(set(ev.loc[gone_ev, "row_id"]))
@@ -134,10 +178,10 @@ def restrict(label: str, tables: dict[str, pd.DataFrame]) -> tuple[dict[str, pd.
 
 def load_tables(label: str, data_dir: Path = DATA_DIR, NB: dict | None = None,
                 names: tuple[str, ...] = ("events", "nulls", "gap")) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
-    """Read data_dir/<name>_<label>.csv safely, drop what the window edge forces out, then check dates."""
+    """Read data_dir/<name>_<label>.csv safely, drop what the end of the window forces out, then check dates.
+    The label is checked before any file is touched (retired labels and unswitched ones refuse)."""
     data_dir = Path(data_dir)
-    if label == "oos":
-        guard_dates(label, {}, NB)                      # refuse before reading anything
+    check_label(label, NB)
     tables = {k: read_table(data_dir / f"{k}_{label}.csv") for k in names}
     n_before = len(tables["events"])
     tables, dropped = restrict(label, tables)
@@ -206,20 +250,45 @@ def _sha(ids: list[str]) -> str:
 
 
 # ---- the frozen constants ----------------------------------------------------------------------------------
-def freeze(label: str = "discovery", data_dir: Path = DATA_DIR, path: Path | None = None,
+def frozen_path(source: str = "insample") -> Path:
+    """Where the constants live: src/oldnews/zref_frozen_insample.json, the only file any label uses. Looked up
+    at call time. The retired 2022-23 file is never returned."""
+    if source == "discovery":
+        raise PermissionError(RETIRED_ZREF_MSG)
+    if source not in ZREF_SOURCES:
+        raise ValueError(f"constants source must be one of {ZREF_SOURCES}, not {source!r}")
+    return Path(FROZEN_PATH_INSAMPLE)
+
+
+def default_zref_source(label: str, NB: dict | None = None) -> str:
+    """Every allowed label (insample, holdout, oos) uses the 2024-25 constants. Retired and unknown labels
+    refuse (and holdout / oos refuse unless their switch is on)."""
+    check_label(label, NB)
+    return "insample"
+
+
+NOTE = ("FROZEN CONSTANTS. Computed once from the 2024-25 window only (filings 2024-01-01 to "
+        "2025-12-31): usable ordinary days, people and placebo together, gap inputs only, never outcomes. "
+        "Applied unchanged to the 2024-25 test window and to the sealed window "
+        "(docs/test_plan.md, Windows amendment and Classification).")
+
+
+def freeze(label: str = "insample", data_dir: Path = DATA_DIR, path: Path | None = None,
            overwrite: bool = False) -> dict:
-    """Compute the six standardisation constants ONCE and write them to src/oldnews/zref_frozen.json.
+    """Compute the six standardisation constants ONCE and write them to src/oldnews/zref_frozen_insample.json.
 
     The only function that writes that file; `run` never does. The constants are the mean and standard deviation
-    of gap_move, d_iv_gap and log(vol_gap_ratio) over the usable discovery-window ordinary days (people and
-    placebo nulls together; gap inputs only, no outcomes; nothing on or after 2024-01-01), each over the days
-    where that input exists. The file also records, per input, the count and a sha256 of the row ids, and for
-    the sample as a whole the count, the date range and a sha256 of the row ids. It then ships committed and is
-    applied unchanged to every window. Refuses any label but "discovery", and refuses to replace an existing
-    file unless overwrite=True (a change is a plan amendment, made in its own commit)."""
-    if label != "discovery":
-        raise ValueError(f"the constants come from the discovery window only, not {label!r}")
-    path = Path(FROZEN_PATH if path is None else path)
+    of gap_move, d_iv_gap and log(vol_gap_ratio) over the usable ordinary days of the insample null rows (people
+    and placebo together; gap inputs only, no outcomes; the window guard applies), each over the days where that
+    input exists. The file also records, per input, the count and a sha256 of the row ids, and for the sample as
+    a whole the count, the date range and a sha256 of the row ids; `source` is "insample". It then ships
+    committed. Only the label "insample" can be frozen (discovery and dryrun are retired), and an existing file
+    is never replaced unless overwrite=True (a change is a plan amendment, made in its own commit)."""
+    if label in RETIRED:
+        raise PermissionError(RETIRED_MSG)
+    if label != "insample":
+        raise ValueError(f"constants can be frozen on the label 'insample' only, not {label!r}")
+    path = frozen_path("insample") if path is None else Path(path)
     if path.exists() and not overwrite:
         raise FileExistsError(f"{path} already exists: the constants are frozen once. Pass overwrite=True only as a "
                               "documented plan amendment, in its own commit.")
@@ -228,11 +297,8 @@ def freeze(label: str = "discovery", data_dir: Path = DATA_DIR, path: Path | Non
     ids, by_input = ref.attrs["row_ids"], ref.attrs["row_ids_by_input"]
     t0 = pd.to_datetime(tables["nulls"].set_index("row_id").loc[ids, "t_0"])
     doc = {
-        "_note": ("FROZEN CONSTANTS. Computed once from the DISCOVERY window only (filings 2022-01-01 to "
-                  "2023-12-31): usable ordinary days, people and placebo together, gap inputs only, never outcomes. "
-                  "Applied unchanged to discovery, confirmation, the dry run and the sealed window "
-                  "(docs/test_plan.md, Classification)."),
-        "source": "discovery",
+        "_note": NOTE,
+        "source": label,
         "uses_outcomes": False,
         "inputs": {"gap_move": "|r_gap - r_mkt| / (sigma * sqrt(n))", "d_iv_gap": "1m ATM IV at t_pre minus at gap start",
                    "log_vol_gap_ratio": "log(ATM-pair volume in the gap / mean over the 5 sessions before); a ratio "
@@ -249,16 +315,30 @@ def freeze(label: str = "discovery", data_dir: Path = DATA_DIR, path: Path | Non
     return doc
 
 
-def load_frozen(path: Path | None = None) -> pd.DataFrame:
-    """The frozen constants as a table (index: input; columns mean, sd, n_null). Refuses if the file is missing
-    or malformed. Never writes: only `freeze` does."""
-    path = Path(FROZEN_PATH if path is None else path)
+def load_frozen(path: Path | None = None, source: str | None = None, archive: bool = False) -> pd.DataFrame:
+    """The frozen constants as a table (index: input; columns mean, sd, n_null). With no path: the insample file.
+    Refuses if the file is missing or malformed, or if its recorded `source` is not "insample". A file recorded
+    as "discovery" (the retired 2022-23 constants) is refused for every caller, except as an explicit read-only
+    archive read (`archive=True` with an explicit path, meant for tests). Never writes: only `freeze` does."""
+    if path is None:
+        if archive:
+            raise ValueError("an archive read needs an explicit path")
+        path = frozen_path(source or "insample")
+    path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"{path} is missing. Classification needs the frozen constants: run "
-                                "oldnews.classify.freeze() once on the discovery data and commit the file.")
+        raise FileNotFoundError(f"{path} is missing. Classification needs the frozen 2024-25 constants: run "
+                                "oldnews.classify.freeze('insample') once on the insample data, and commit the file. "
+                                "Nothing falls back to another file.")
     doc = json.loads(path.read_text(encoding="utf-8"))
-    if doc.get("source") != "discovery" or doc.get("uses_outcomes") is not False:
-        raise ValueError(f"{path} does not say the constants come from discovery inputs only; refusing")
+    if doc.get("uses_outcomes") is not False:
+        raise ValueError(f"{path} does not say the constants use no outcomes; refusing")
+    if doc.get("source") == "discovery":
+        if not archive:
+            raise PermissionError(RETIRED_ZREF_MSG)
+    elif doc.get("source") not in ZREF_SOURCES:
+        raise ValueError(f"{path} does not say the constants come from the insample window; refusing")
+    elif source is not None and doc["source"] != source:
+        raise ValueError(f"{path} holds constants frozen on {doc['source']!r}, but {source!r} was asked for; refusing")
     try:
         ref = pd.DataFrame({c: doc["constants"][c] for c in INPUTS}).T[["mean", "sd", "n"]].astype(float)
     except (KeyError, TypeError, ValueError) as e:
@@ -269,7 +349,7 @@ def load_frozen(path: Path | None = None) -> pd.DataFrame:
     ref["n_null"] = ref["n_null"].astype(int)
     ref.index.name = "input"
     ref.attrs.update(source=doc["source"], sha256=doc["null_row_ids_sha256"], window_t_0=doc["window_t_0"],
-                     n_null_rows=int(doc["n_null_rows"]))
+                     n_null_rows=int(doc["n_null_rows"]), path=str(path), archive=bool(archive))
     return ref
 
 
@@ -281,14 +361,16 @@ def classify(events: pd.DataFrame, gap: pd.DataFrame, ref: pd.DataFrame | None =
     (`n_inputs` says how many M used). An event without a gap move, or without T, is not scored: `scored` is
     False and `unscored_reason` says why, so it can be counted and reported.
 
-    The z-scores always use the frozen discovery constants (`ref` only lets tests pass others), so an event gets
-    the same M whichever window, or whichever other events, it is classified with."""
+    The z-scores always use frozen constants (passed in as `ref`), so an event gets
+    the same M whichever window, or whichever other events, it is classified with. The constants must be passed
+    (`load_frozen()`); nothing is loaded here, so no window can pick up another file by accident."""
     missing = {"row_id", "T"} - set(events.columns)
     if missing:
         raise ValueError(f"events table is missing columns {sorted(missing)}")
     if events["row_id"].duplicated().any():
         raise ValueError("events table has duplicate row_id values")
-    ref = load_frozen() if ref is None else ref
+    if ref is None:
+        raise ValueError("classify needs the frozen constants: pass ref=load_frozen()")
     g = gap_table(gap)
     in_gap = events["row_id"].isin(g.index).to_numpy()
     ev = events.join(g, on="row_id")
@@ -320,12 +402,20 @@ def classify(events: pd.DataFrame, gap: pd.DataFrame, ref: pd.DataFrame | None =
     return ev
 
 
-def run(label: str, data_dir: Path = DATA_DIR, NB: dict | None = None) -> pd.DataFrame:
-    """Read events, nulls and gap for `label`, drop and count the window-edge rows, check dates, classify with the
-    frozen constants (refuses if src/oldnews/zref_frozen.json is missing; never writes it), write
-    classified_<label>.csv and zref_<label>.csv (a copy of the constants applied), and return the labelled table
-    (`.attrs` holds `reference` and `dropped`). Pass NB (the notebook namespace) so oos can see RUN_OOS."""
-    ref = load_frozen()
+def run(label: str, data_dir: Path = DATA_DIR, NB: dict | None = None, zref_source: str | None = None,
+        zref: Path | None = None) -> pd.DataFrame:
+    """Read events, nulls and gap for `label`, drop and count the rows past the end of the window, check dates,
+    classify with the frozen constants, write classified_<label>.csv and zref_<label>.csv (a copy of the
+    constants applied, with their source), and return the labelled table (`.attrs` holds `reference` and
+    `dropped`).
+
+    Labels: insample, holdout (only when RUN_HOLDOUT is True in NB) and oos (only when RUN_OOS is True); discovery
+    and dryrun are retired and refuse, before anything is read. Constants: always zref_frozen_insample.json
+    (`zref` may name that file explicitly; a file recorded as "discovery" is refused). A missing file is an
+    error, never a fallback; this function never writes it. Pass NB (the notebook namespace) so the switches
+    and HOLDOUT_START / HOLDOUT_END can be seen."""
+    check_label(label, NB)
+    ref = load_frozen(zref, zref_source)
     tables, dropped = load_tables(label, data_dir, NB)
     return save(label, Path(data_dir), classify(tables["events"], tables["gap"], ref), dropped)
 
@@ -334,5 +424,6 @@ def save(label: str, data_dir: Path, labelled: pd.DataFrame, dropped: pd.DataFra
     """Write the labelled table and the standardisation reference next to the inputs."""
     labelled.attrs["dropped"] = dropped
     labelled.to_csv(data_dir / f"classified_{label}.csv", index=False)
-    labelled.attrs["reference"].to_csv(data_dir / f"zref_{label}.csv")
+    ref = labelled.attrs["reference"]
+    ref.assign(source=ref.attrs.get("source", "")).to_csv(data_dir / f"zref_{label}.csv")
     return labelled

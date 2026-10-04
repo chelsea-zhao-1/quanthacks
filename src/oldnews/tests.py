@@ -96,9 +96,10 @@ def _norm_outcome(o: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare(events: pd.DataFrame, nulls: pd.DataFrame, gap: pd.DataFrame, outcome: pd.DataFrame,
-            classified: pd.DataFrame | None = None) -> Inputs:
-    """Validate and normalise the four input tables; classify (frozen constants) unless a labelled table is given."""
-    c = (classified if classified is not None else cl.classify(events, gap)).copy()
+            classified: pd.DataFrame | None = None, ref: pd.DataFrame | None = None) -> Inputs:
+    """Validate and normalise the four input tables. Pass the labelled table (`classified`) or the frozen
+    constants (`ref`, from classify.load_frozen); there is no default, so nothing picks a constants file silently."""
+    c = (classified if classified is not None else cl.classify(events, gap, ref)).copy()
     for col in ("late", "earnings_excluded", "scored"):
         c[col] = cl.as_bool(c[col])
     c["t_0"] = pd.to_datetime(c["t_0"], errors="coerce")
@@ -326,7 +327,8 @@ def _log(table: pd.DataFrame, log: Log | None) -> pd.DataFrame:
     t = table
     led = pd.DataFrame({
         "kind": "oldnews_" + t["test"], "level": t["weights"], "group": t["group"], "subset": t["category"],
-        "filter": "S>=" + t["cutoff"].map("{:g}".format), "metric": t["metric"], "strategy": "",
+        "filter": "S>=" + t["cutoff"].map("{:g}".format) + t["period"].map(
+            lambda v: "" if v == "pooled" else f"|year={v}"), "metric": t["metric"], "strategy": "",
         "bucket": t["bucket"], "horizon": t["horizon"], "otm": t["otm"], "entry": "t_0", "n_sets": t["n"],
         "n_tickers": t["n_tickers"], "event_mean": t["mean_old"], "null_mean": t["mean_comp"], "diff": t["effect"],
         "p_perm": t["p"], "q_bh": t["q_bh"], "trimmed_diff": t["trimmed_effect"], "loto_holds": t["loto_holds"],
@@ -337,30 +339,34 @@ def _log(table: pd.DataFrame, log: Log | None) -> pd.DataFrame:
 
 
 # ---- the tests ---------------------------------------------------------------------------------------------
-def h1(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT, **kw) -> pd.DataFrame:
+def h1(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT, period: str = "pooled",
+       **kw) -> pd.DataFrame:
     """Primary test (defaults = the committed spec). Keyword overrides: weights, cutoff, bucket, horizon, otm,
-    category."""
-    return _log(pd.DataFrame([_row(inp, "H1", n_perm, n_boot, **kw)]), log)
+    category. `period` only labels the rows ("pooled", or a t_0 year when `inp` was cut with `restrict_year`)."""
+    return _log(pd.DataFrame([_row(inp, "H1", n_perm, n_boot, **kw)]).assign(period=str(period)), log)
 
 
-def h1b(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT, **kw) -> pd.DataFrame:
+def h1b(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT, period: str = "pooled",
+        **kw) -> pd.DataFrame:
     """Old events against ordinary days whose gap move was at least as large (prediction: negative)."""
-    return _log(pd.DataFrame([_row(inp, "H1b", n_perm, n_boot, **kw)]), log)
+    return _log(pd.DataFrame([_row(inp, "H1b", n_perm, n_boot, **kw)]).assign(period=str(period)), log)
 
 
-def placebo(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT, **kw) -> pd.DataFrame:
+def placebo(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT, period: str = "pooled",
+            **kw) -> pd.DataFrame:
     """H1 computed on the placebo filings (prediction: no difference)."""
-    return _log(pd.DataFrame([_row(inp, "P", n_perm, n_boot, **kw)]), log)
+    return _log(pd.DataFrame([_row(inp, "P", n_perm, n_boot, **kw)]).assign(period=str(period)), log)
 
 
-def horizon_profile(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT) -> pd.DataFrame:
+def horizon_profile(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT,
+                    period: str = "pooled") -> pd.DataFrame:
     """H1, H1b and P at every fixed horizon; BH q-values across the nine horizons within each test."""
     parts = []
     for test in ("H1", "H1b", "P"):
         t = pd.DataFrame([_row(inp, test, n_perm, n_boot, horizon=h) for h in HORIZONS])
         t["q_bh"] = stats.benjamini_hochberg(t["p"].to_numpy(float))
         parts.append(t)
-    return _log(pd.concat(parts, ignore_index=True), log)
+    return _log(pd.concat(parts, ignore_index=True).assign(period=str(period)), log)
 
 
 def sensitivity(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT) -> pd.DataFrame:
@@ -372,7 +378,7 @@ def sensitivity(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boo
     specs += [("otm", {"otm": o}) for o in OTMS if o != PRIMARY["otm"]]
     specs += [("category", {"category": k}) for k in CATEGORIES if k != PRIMARY["category"]]
     t = pd.DataFrame([{"dimension": dim, **_row(inp, "H1", n_perm, n_boot, **kw)} for dim, kw in specs])
-    return _log(t, log)
+    return _log(t.assign(period="pooled"), log)
 
 
 def counts(inp: Inputs) -> pd.DataFrame:
@@ -435,6 +441,35 @@ def coverage(inp: Inputs) -> pd.DataFrame:
     return pd.DataFrame(cols).fillna(0).rename_axis("what").reset_index()
 
 
+# ---- pooled primary result, and each t_0 year as a robustness check ------------------------------------------
+YEAR_SPLIT = {"insample": (2024, 2025)}          # labels that also report each year separately (amended test plan)
+
+
+def restrict_year(inp: Inputs, year: int) -> Inputs:
+    """The same inputs cut to the filings whose entry day t_0 falls in `year`, with only the ordinary days drawn
+    for those filings. Nothing is recomputed: labels and outcomes are the pooled run's."""
+    c = inp.classified
+    keep = pd.to_datetime(c["t_0"]).dt.year == int(year)
+    ids = set(c.loc[keep, "row_id"])
+    return Inputs(c[keep], inp.nulls[inp.nulls["event_row_id"].isin(ids)], inp.gap, inp.outcome)
+
+
+def by_year(inp: Inputs, years: tuple[int, ...], log: Log | None = None, n_perm: int = N_PERM,
+            n_boot: int = N_BOOT) -> dict[str, pd.DataFrame]:
+    """H1, H1b, P and the horizon profile for each year separately, all logged (period = the year). Returns
+    `by_year` (H1, H1b, P rows), `profile_by_year` and `counts_by_year` (n per step and group, columns per year)."""
+    main, prof, cnt = [], [], None
+    for y in years:
+        iy = restrict_year(inp, y)
+        main += [h1(iy, log, n_perm, n_boot, period=str(y)), h1b(iy, log, n_perm, n_boot, period=str(y)),
+                 placebo(iy, log, n_perm, n_boot, period=str(y))]
+        prof.append(horizon_profile(iy, log, n_perm, n_boot, period=str(y)))
+        ct = counts(iy).rename(columns={"people": f"people_{y}", "placebo": f"placebo_{y}"})
+        cnt = ct if cnt is None else cnt.merge(ct, on="step", how="outer")
+    return {"by_year": pd.concat(main, ignore_index=True), "profile_by_year": pd.concat(prof, ignore_index=True),
+            "counts_by_year": cnt.fillna(0) if cnt is not None else pd.DataFrame()}
+
+
 # ---- the whole run -----------------------------------------------------------------------------------------
 def _md(df: pd.DataFrame) -> str:
     """A plain Markdown table (numbers to at most 4 decimals)."""
@@ -458,19 +493,23 @@ def _fmt(r: pd.Series) -> str:
     return s + ("  **DESCRIPTIVE: fewer than 30 events qualify.**" if r["descriptive"] else "")
 
 
-def _summary(label: str, t: dict, cap: pd.Timestamp | None, log: Log, n_perm: int, n_boot: int, added: int,
-             dropped: pd.DataFrame, ref: pd.DataFrame) -> str:
+def _summary(label: str, t: dict, cap: tuple | None, log: Log, n_perm: int, n_boot: int, added: int,
+             dropped: pd.DataFrame, ref: pd.DataFrame, years: tuple[int, ...] = (), NB: dict | None = None) -> str:
     h, b, p = t["h1"].iloc[0], t["h1b"].iloc[0], t["placebo"].iloc[0]
+    h0, h1 = cl.holdout_window(NB)
     lines = [f"# Old news vs surprise news: {label}", "",
              f"Run `{log.run_id}`, git `{log.head[:10]}`, seed {SEED}, {n_perm:,} permutations, {n_boot:,} "
              f"bootstrap resamples. Dates: "
-             + (f"no entry-side date on or after {cap.date()}, no usable exit on or after {cl.HARD_STOP.date()}."
-                if cap is not None else "no date cap (the label is gated upstream by RUN_HOLDOUT / RUN_OOS).")
+             + (f"every date inside [{cap[0].date()}, {cap[1].date()}) and outside the sealed window "
+                f"{h0.date()}..{h1.date()}."
+                if cap is not None else "no date cap (the label is switched by RUN_HOLDOUT / RUN_OOS in the notebook).")
              + f" Outcome = log(RV/IV0) minus the mean over the event's matched ordinary days. Math inputs are "
-             f"standardised with the frozen discovery constants (volume as log of the ratio; M is the mean of the available "
-             f"inputs, gap move required; src/oldnews/zref_frozen.json; {ref.attrs['n_null_rows']} "
+             f"standardised with the frozen {ref.attrs['source']} constants (volume as log of the ratio; M is the mean of the "
+             f"available inputs, gap move required; {Path(ref.attrs['path']).name}; {ref.attrs['n_null_rows']} "
              f"ordinary days, {ref.attrs['window_t_0']['first']} to {ref.attrs['window_t_0']['last']}, sha256 "
-             f"{ref.attrs['sha256'][:12]}), the same in every window.", "",
+             f"{ref.attrs['sha256'][:12]}), applied unchanged to every event of this run.", "",
+             *([f"**Primary result: pooled over t_0 years {', '.join(map(str, years))}.** Each year is reported "
+                "separately below as a robustness check (same rules, n per group in every row).", ""] if years else []),
              "## Counts", "", _md(t["counts"]), "",
              "## Coverage of the gap inputs (late, earnings-excluded filings)", "", _md(t["coverage"]), "",
              *(["Dropped at the window edge before anything was computed:", "", _md(dropped), ""]
@@ -486,8 +525,18 @@ def _summary(label: str, t: dict, cap: pd.Timestamp | None, log: Log, n_perm: in
     lines += [_md(t["profile"][cols]), "", "## Sensitivity (H1, one change at a time)", ""]
     cols = ["dimension", "weights", "cutoff", "bucket", "otm", "category", "n", "n_old", "n_comp", "effect",
             "ci_lo", "ci_hi", "p_one_sided", "descriptive"]
-    lines += [_md(t["sensitivity"][cols]), "",
-              "## Not computed here", "",
+    lines += [_md(t["sensitivity"][cols]), ""]
+    if years:
+        lines += ["## By year (robustness check, split by the year of the entry day t_0)", "",
+                  "n_old is the old-news group, n_comp the comparison group (surprise events; for H1b the median "
+                  "number of ordinary days per event). A year with fewer than 30 events is descriptive.", ""]
+        for y in years:
+            sel = t["by_year"][t["by_year"]["period"] == str(y)]
+            lines += [f"### {y}", ""] + [f"- **{r['test']}** ({r['prediction']}): {_fmt(r)}" for _, r in sel.iterrows()] + [""]
+        cols = ["period", "test", "horizon", "n", "n_old", "n_comp", "effect", "ci_lo", "ci_hi", "p", "q_bh", "descriptive"]
+        lines += ["### Horizon profile by year (BH q across the nine horizons, within each test and year)", "",
+                  _md(t["profile_by_year"][cols]), "", "### Counts by year", "", _md(t["counts_by_year"]), ""]
+    lines += ["## Not computed here", "",
               "- H2 and the trade record: see `trade_<label>/` (src/oldnews/trade.py).",
               "- Entry session t_0 + 1 and full-text word cues: not in the input tables.", "",
               f"Ledger: this run added {added} rows; {ledger.variant_count(Path(log.path))} rows in total."]
@@ -495,14 +544,25 @@ def _summary(label: str, t: dict, cap: pd.Timestamp | None, log: Log, n_perm: in
 
 
 def run(label: str, data_dir: Path = DATA_DIR, NB: dict | None = None, n_perm: int = N_PERM,
-        n_boot: int = N_BOOT, log: Log | None = None) -> dict[str, pd.DataFrame]:
+        n_boot: int = N_BOOT, log: Log | None = None, zref_source: str | None = None, zref: Path | None = None,
+        years: tuple[int, ...] | None = None) -> dict[str, pd.DataFrame]:
     """Run every test for `label` from data_dir/{events,nulls,gap,outcome}_<label>.csv and write
-    data_dir/results_<label>/ (tables and summary.md). Window-edge rows are dropped and counted, then dates are
-    checked (classify.guard_dates). Pass NB (the notebook namespace) so the oos label can see RUN_OOS."""
+    data_dir/results_<label>/ (tables and summary.md). Rows past the end of the window are dropped and counted,
+    then dates are checked (classify.guard_dates). Pass NB (the notebook namespace) so the switches and
+    HOLDOUT_START / HOLDOUT_END can be seen.
+
+    Labels: insample; holdout (only when RUN_HOLDOUT is True in NB); oos (only when RUN_OOS is True). discovery
+    and dryrun are retired and refuse. Constants: always src/oldnews/zref_frozen_insample.json (`zref` may name
+    it explicitly; the retired 2022-23 file is refused). A missing file is an error, never a fallback.
+    The pooled run is the primary result. For "insample" (or when `years` is given) H1, H1b, P and the horizon
+    profile are also reported for each t_0 year, as `by_year`, `profile_by_year` and `counts_by_year`, and logged
+    with the year in the ledger's filter column."""
     data_dir = Path(data_dir)
-    ref = cl.load_frozen()                    # refuses, before anything is read, if the frozen constants are missing
+    cl.check_label(label, NB)                 # retired labels refuse; holdout and oos only behind their switch
+    ref = cl.load_frozen(zref, zref_source)   # refuses, before anything is read, if the 2024-25 constants are missing
+    years = YEAR_SPLIT.get(label, ()) if years is None else tuple(years)
     frames, dropped = cl.load_tables(label, data_dir, NB, ("events", "nulls", "gap", "outcome"))
-    cap = cl.entry_cap(label)
+    cap = cl.window(label)
     classified = cl.save(label, data_dir, cl.classify(frames["events"], frames["gap"], ref), dropped)
     inp = prepare(frames["events"], frames["nulls"], frames["gap"], frames["outcome"], classified=classified)
     log = log or Log(data_dir / "ledger.csv")
@@ -510,12 +570,14 @@ def run(label: str, data_dir: Path = DATA_DIR, NB: dict | None = None, n_perm: i
     t = {"counts": counts(inp), "coverage": coverage(inp), "h1": h1(inp, log, n_perm, n_boot), "h1b": h1b(inp, log, n_perm, n_boot),
          "placebo": placebo(inp, log, n_perm, n_boot), "profile": horizon_profile(inp, log, n_perm, n_boot),
          "sensitivity": sensitivity(inp, log, n_perm, n_boot)}
+    if years:
+        t.update(by_year(inp, years, log, n_perm, n_boot))
     out = data_dir / f"results_{label}"
     out.mkdir(parents=True, exist_ok=True)
     dropped.to_csv(out / "dropped.csv", index=False)
     for k, v in t.items():
         v.to_csv(out / f"{k}.csv", index=False)
     added = ledger.variant_count(Path(log.path)) - before
-    (out / "summary.md").write_text(_summary(label, t, cap, log, n_perm, n_boot, added, dropped, ref), encoding="utf-8")
+    (out / "summary.md").write_text(_summary(label, t, cap, log, n_perm, n_boot, added, dropped, ref, years, NB), encoding="utf-8")
     print(f"[{label}] H1: {_fmt(t['h1'].iloc[0])}")
     return t

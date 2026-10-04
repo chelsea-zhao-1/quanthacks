@@ -278,35 +278,59 @@ check("check_dates with no hard stop (holdout, oos) accepts any date",
       not raises(lambda: E.check_dates(pd.DataFrame({"t_0": [T("2026-09-15")]}), ["t_0"], None, "x")))
 
 
-# ---- Windows and guards by label ------------------------------------------------------------------------------------------
-def refused(f, kind=PermissionError):
+# ---- Windows and guards by label (.claude/ctx/06_window_guard.md) --------------------------------------------------------
+import requests as _requests            # noqa: E402
+
+
+def _no_network(*a, **k):
+    raise AssertionError("a test reached the network")
+
+
+_requests.get = _no_network             # every test must stay offline; tests that fetch pass their own fake
+
+
+def refused(f, kind=PermissionError, text=None):
     try:
         f()
-    except kind:
-        return True
+    except kind as e:
+        return text is None or text in str(e)
     except Exception as e:  # noqa: BLE001
         print("   raised", type(e).__name__, str(e)[:100])
     return False
 
 
+RETIRED = ("2022-2023 is outside the allowed 2024-2025 window and overlaps the sealed placeholder (2023-06-01..2023-08-31)")
 NB0 = {"OOS_START": "2026-01-01", "OOS_END": "2026-08-31", "HOLDOUT_START": "2023-06-01", "HOLDOUT_END": "2023-08-31"}
 rw = lambda label, window=None, **flags: E.resolve_window(label, {**NB0, **flags}, window)      # noqa: E731
-check("resolve_window defaults: discovery, dryrun, insample",
-      [rw(l) for l in ("discovery", "dryrun", "insample")] ==
-      [("2022-01-01", "2023-12-31", "2024-01-01"), ("2023-07-01", "2023-12-31", "2024-01-01"), ("2024-01-01", "2025-12-31", "2026-01-01")])
-check("resolve_window: a window argument replaces the default dates", rw("discovery", ("2023-07-01", "2023-09-30")) ==
-      ("2023-07-01", "2023-09-30", "2024-01-01") and rw("insample", (T("2024-03-01"), "2024-03-31")) == ("2024-03-01", "2024-03-31", "2026-01-01"))
-check("discovery and dryrun refuse a window that reaches 2024-01-01",
-      refused(lambda: rw("discovery", ("2023-12-01", "2024-01-01"))) and refused(lambda: rw("dryrun", ("2023-12-01", "2024-03-31")))
-      and refused(lambda: rw("discovery", ("2024-06-01", "2024-06-30"))))
-check("insample refuses a window that reaches 2026-01-01, and one that starts there",
-      refused(lambda: rw("insample", ("2025-06-01", "2026-01-01"))) and refused(lambda: rw("insample", ("2026-03-01", "2026-03-31"))))
-check("an unnamed label gets the discovery rules and needs a window",
-      rw("myrun", ("2022-05-01", "2022-05-31")) == ("2022-05-01", "2022-05-31", "2024-01-01")
-      and refused(lambda: rw("myrun", ("2023-12-01", "2024-02-01"))) and refused(lambda: rw("myrun"), ValueError))
-check("a third window item is ignored: it cannot loosen or tighten the guard",
-      refused(lambda: rw("discovery", ("2023-12-01", "2024-02-01", "2030-01-01")))
-      and rw("discovery", ("2022-05-01", "2022-05-31", "2020-01-01")) == ("2022-05-01", "2022-05-31", "2024-01-01")
+check("retired labels refuse with the stated message, whatever the window and switches",
+      all(refused(lambda l=l, w=w: rw(l, w, RUN_OOS=True, RUN_HOLDOUT=True), text=RETIRED)
+          for l in ("discovery", "dryrun") for w in (None, ("2022-01-01", "2023-12-31"), ("2024-03-01", "2024-03-31")))
+      and E.RETIRED_MESSAGE == RETIRED and refused(lambda: E.resolve_window("discovery", {}), text=RETIRED))
+check("build refuses discovery and dryrun before loading the notebook or reading any file",
+      refused(lambda: E.build("discovery", None, playground=Path("/nonexistent")), text=RETIRED)
+      and refused(lambda: E.build("dryrun", {}, playground=Path("/nonexistent"), window=("2024-01-01", "2024-06-30")), text=RETIRED)
+      and "discovery" not in E.WINDOWS and "dryrun" not in E.WINDOWS and not hasattr(E, "PRIOR"))
+check("insample default window and a window argument inside [2024-01-01, 2026-01-01)",
+      rw("insample") == ("2024-01-01", "2025-12-31", "2026-01-01")
+      and rw("insample", (T("2024-03-01"), "2024-03-31")) == ("2024-03-01", "2024-03-31", "2026-01-01")
+      and rw("insample", ("2025-12-31", "2025-12-31")) == ("2025-12-31", "2025-12-31", "2026-01-01"))
+check("insample refuses a window that starts before 2024, reaches 2026 or sits in 2022-23",
+      all(refused(lambda w=w: rw("insample", w)) for w in (("2023-12-31", "2024-06-30"), ("2025-06-01", "2026-01-01"),
+                                                          ("2026-03-01", "2026-03-31"), ("2022-01-01", "2023-12-31"),
+                                                          ("2023-06-01", "2023-08-31"), ("2024-01-01", "2026-08-31"))))
+check("insample refuses a window that overlaps the sealed window the judges set, even inside 2024-25",
+      refused(lambda: rw("insample", ("2024-06-01", "2025-12-31"), HOLDOUT_START="2025-03-01", HOLDOUT_END="2025-03-31"))
+      and refused(lambda: rw("insample", ("2024-06-01", "2025-03-01"), HOLDOUT_START="2025-03-01", HOLDOUT_END="2025-03-31"))
+      and refused(lambda: rw("insample", ("2025-03-31", "2025-12-31"), HOLDOUT_START="2025-03-01", HOLDOUT_END="2025-03-31"))
+      and rw("insample", ("2024-06-01", "2025-02-28"), HOLDOUT_START="2025-03-01", HOLDOUT_END="2025-03-31")[:2] == ("2024-06-01", "2025-02-28")
+      and rw("insample", ("2025-04-01", "2025-12-31"), HOLDOUT_START="2025-03-01", HOLDOUT_END="2025-03-31")[:2] == ("2025-04-01", "2025-12-31"))
+check("without HOLDOUT_START and END in the namespace the sealed placeholder 2023-06-01..2023-08-31 applies",
+      E.sealed_window({}) == ("2023-06-01", "2023-08-31") and E.sealed_window({"HOLDOUT_START": "2025-03-01", "HOLDOUT_END": "2025-03-31"}) == ("2025-03-01", "2025-03-31")
+      and E.resolve_window("insample", {"OOS_START": "2026-01-01"}, ("2024-01-01", "2024-06-30"))[:2] == ("2024-01-01", "2024-06-30"))
+check("an unnamed label is refused", refused(lambda: rw("myrun", ("2024-05-01", "2024-05-31"))) and refused(lambda: rw("myrun")))
+check("a third window item is ignored: it cannot loosen the insample guard or the holdout switch",
+      refused(lambda: rw("insample", ("2025-06-01", "2026-02-01", "2030-01-01")))
+      and rw("insample", ("2024-05-01", "2024-05-31", "2020-01-01")) == ("2024-05-01", "2024-05-31", "2026-01-01")
       and rw("holdout", ("2026-09-01", "2026-09-30", "2026-01-01"), RUN_HOLDOUT=True) == ("2026-09-01", "2026-09-30", None))
 check("holdout needs RUN_HOLDOUT to be exactly True (False, missing, 1 and 'yes' refuse)",
       all(refused(lambda f=f: rw("holdout", **f)) for f in ({}, {"RUN_HOLDOUT": False}, {"RUN_HOLDOUT": 1}, {"RUN_HOLDOUT": "yes"}))
@@ -316,18 +340,50 @@ check("holdout with its switch has no date guard, even in 2026 and beyond",
 check("oos needs RUN_OOS to be exactly True, then takes the notebook's OOS dates",
       all(refused(lambda f=f: rw("oos", **f)) for f in ({}, {"RUN_OOS": False}, {"RUN_OOS": 1}))
       and rw("oos", RUN_OOS=True) == ("2026-01-01", "2026-08-31", None))
-check("each switch unlocks only its own label; RUN_OOS never loosens a guarded label",
+check("each switch unlocks only its own label; neither loosens insample",
       refused(lambda: rw("holdout", RUN_OOS=True)) and refused(lambda: rw("oos", RUN_HOLDOUT=True))
-      and refused(lambda: rw("discovery", ("2026-01-01", "2026-03-01"), RUN_OOS=True, RUN_HOLDOUT=True))
-      and refused(lambda: rw("insample", ("2025-06-01", "2026-03-01"), RUN_OOS=True, RUN_HOLDOUT=True)))
-check("a guarded label whose stop passes the out-of-sample start refuses",
+      and refused(lambda: rw("insample", ("2025-06-01", "2026-03-01"), RUN_OOS=True, RUN_HOLDOUT=True))
+      and refused(lambda: rw("insample", ("2026-01-01", "2026-03-01"), RUN_OOS=True, RUN_HOLDOUT=True)))
+check("insample refuses when its hard stop passes the notebook's out-of-sample start",
       refused(lambda: E.resolve_window("insample", {"OOS_START": "2025-07-01"}, ("2025-01-01", "2025-03-01"))))
 check("window validation: not a real date, start after end, no default",
-      refused(lambda: rw("discovery", ("2022-02-30", "2022-03-31")), ValueError) and refused(lambda: rw("discovery", ("2022-05-01", "2022-04-01")), ValueError)
+      refused(lambda: rw("insample", ("2024-02-30", "2024-03-31")), ValueError) and refused(lambda: rw("insample", ("2024-05-01", "2024-04-01")), ValueError)
       and refused(lambda: E.resolve_window("holdout", {"RUN_HOLDOUT": True}), ValueError))
-check("build keeps its old signature (positional label, NB, out_dir, playground, write; new arguments last)",
+check("build keeps its old signature (positional label, NB, out_dir, playground, write; new arguments last; insample default)",
       list(inspect.signature(E.build).parameters)[:5] == ["label", "NB", "out_dir", "playground", "write"]
-      and list(inspect.signature(E.build).parameters)[5:] == ["window", "cache_dir"])
+      and list(inspect.signature(E.build).parameters)[5:] == ["window", "cache_dir", "full_text"]
+      and inspect.signature(E.build).parameters["label"].default == "insample")
+
+# outside_allowed and the table-level bounds
+SEALED = ("2023-06-01", "2023-08-31")
+d = pd.DataFrame({"a": pd.to_datetime(["2023-12-29", "2024-01-02", "2025-12-31", "2026-01-01", "2023-07-04", None, "2025-03-15"])})
+check("outside_allowed: before the first date, on or after the stop, inside the sealed window; blanks are fine",
+      list(E.outside_allowed(d, ["a"], "2024-01-01", "2026-01-01", SEALED)) == [True, False, False, True, True, False, False]
+      and list(E.outside_allowed(d, ["a"], "2024-01-01", "2026-01-01", ("2025-03-01", "2025-03-31")))[-1] is True)
+acc_b = dated([
+    ("B1", "X", "2024-01-03", "2024-01-03 08:00", "2023-12-28", "ceo_departure", "x"),        # the gap starts 2023-12-27
+    ("B2", "X", "2024-03-12", "2024-03-12 08:00", "2024-03-07", "ceo_departure", "x"),        # fine
+])
+bounds = ("2024-01-01", "2026-01-01", SEALED)
+e_in, c_in = E.event_table(acc_b, acc_b, acc_b.iloc[:0], CLOCK, "2026-01-01", bounds)
+e_all, c_all = E.event_table(acc_b, acc_b, acc_b.iloc[:0], CLOCK, "2026-01-01")
+check("event_table with bounds drops an event whose gap starts before 2024, counts it and records why; without bounds it stays",
+      list(e_in.accession_number) == ["B2"] and c_in["people_gap_reaches_before_2024-01-01"] == 1
+      and list(e_all.accession_number) == ["B1", "B2"] and "people_gap_reaches_before_2024-01-01" not in c_all
+      and e_in.attrs["outside"].to_dict("list")["row_id"] == ["event|B1"]
+      and e_in.attrs["outside"].reason.tolist() == ["gap reaches before 2024-01-01"] and list(e_in.attrs["outside"].columns) == E.DROPPED_COLUMNS, str(c_in))
+rs = E.outside_reason(pd.DataFrame({"a": pd.to_datetime(["2023-12-29", "2026-01-02", "2024-05-01", "2023-07-04", None]),
+                                    "b": pd.to_datetime(["2024-02-01", "2024-02-01", "2024-02-01", "2026-01-02", None])}), ["a", "b"],
+                      "2024-01-01", "2026-01-01", SEALED)
+check("outside_reason: a date before 2024 gets the gap reason (it wins), a later or sealed date the other reason, blanks none",
+      rs.tolist() == ["gap reaches before 2024-01-01", "a date is on or after 2026-01-01 or inside the sealed window", "",
+                      "gap reaches before 2024-01-01", ""], str(rs.tolist()))
+dn_b = E.null_table(e_all, pd.DataFrame({"ticker": ["X", "X", "X", "X"], "filing_date": pd.to_datetime(["2024-01-03"] * 2 + ["2024-03-12"] * 2),
+                                         "round": [1, 2, 1, 2], "t_0": pd.to_datetime(["2024-06-04", "2024-06-05", "2024-01-03", "2024-06-06"]),
+                                         "t_pre": pd.to_datetime(["2024-06-03", "2024-06-04", "2024-01-02", "2024-06-05"])}), CLOCK, bounds)
+check("null_table with bounds drops an ordinary day whose pseudo-gap starts before 2024 and counts it",
+      dn_b.attrs["outside_allowed"] == 1 and len(dn_b) == 3 and dn_b.gap_start.dropna().min() >= T("2024-01-01"),
+      f"{dn_b.attrs['outside_allowed']} dropped, {len(dn_b)} kept")
 
 
 # ---- build() for every label, on a fake notebook namespace (no real cache, no network) ---------------------------------------
@@ -348,7 +404,13 @@ def times(f):
     return entry_session(a, d), pre_session(a, d)
 
 
-def run_build(label, filings, window=None, fetchable=True, positional=False, **flags):
+def sub(*docs):
+    """An EDGAR full submission text from (type, body) documents."""
+    return "<SEC-HEADER>x</SEC-HEADER>\n" + "".join(
+        f"<DOCUMENT>\n<TYPE>{t}\n<SEQUENCE>{i}\n<FILENAME>f{i}.htm\n<TEXT>\n{b}\n</TEXT>\n</DOCUMENT>\n" for i, (t, b) in enumerate(docs, 1))
+
+
+def run_build(label, filings, window=None, fetchable=True, positional=False, full_text=None, full_docs=None, **flags):
     """build() against a fake namespace: returns (events, nulls, namespace, calls, output file names, dropped table)."""
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -359,9 +421,11 @@ def run_build(label, filings, window=None, fetchable=True, positional=False, **f
         for f in filings:
             if f["cached"]:
                 E.header_path(furl(f), cache).write_text(hdr(f))
+        for acc_no, raw in (full_docs or {}).items():                  # cached full submission texts, as SecFetcher writes them
+            E.full_text_path(furl(next(f for f in filings if f["acc"] == acc_no)), cache).write_text(raw)
 
         def fetch_disclosures(tag, start, end):
-            calls["disclosures"].append(tag)
+            calls["disclosures"].append((tag, start, end))
             rows = [{"cik": "1", "accession_number": f["acc"], "filing_date": T(f["date"]), "tertiary_category": tag,
                      "supporting_text": "text", "filing_url": furl(f), "tickers": ["aaa"]}
                     for f in filings if tag in f["tags"] and start <= f["date"] <= end]
@@ -377,8 +441,9 @@ def run_build(label, filings, window=None, fetchable=True, positional=False, **f
               "fetch_disclosures": fetch_disclosures, "fetch_acceptance_time": fetch_acceptance_time,
               "normalize_ticker": lambda t: t.strip().upper().replace("/", "."), "TOP_100": ["AAA"],
               "api_get_all": lambda path, params=None: [{"tertiary_category": t} for t in E.REQUIRED_TAGS],
-              "SESSION": Session(), "CACHE_DIR": cache, "RUN_OOS": False, "RUN_HOLDOUT": False, **NB0, **flags}
-        stop = {"discovery": "2024-01-01", "dryrun": "2024-01-01", "insample": "2026-01-01"}.get(label, "2100-01-01")
+              "SESSION": Session(), "CACHE_DIR": cache, "SEC_USER_AGENT": "Test Agent test@example.org",
+              "RUN_OOS": False, "RUN_HOLDOUT": False, **NB0, **flags}
+        stop = {"insample": "2026-01-01"}.get(label, "2100-01-01")
         evs, nus = [], []
         for f in filings:                       # the playground's tables, as its download wrote them (no entry at or after the stop)
             t0, tp = times(f)
@@ -390,9 +455,9 @@ def run_build(label, filings, window=None, fetchable=True, positional=False, **f
         pd.DataFrame(evs).to_csv(pg / f"events_{label}.csv", index=False)
         pd.DataFrame(nus).to_csv(pg / f"nulls_{label}.csv", index=False)
         if positional:
-            ev, nu = E.build(label, NB, out, pg, True, window=window)
+            ev, nu = E.build(label, NB, out, pg, True, window=window, full_text=full_text)
         else:
-            ev, nu = E.build(label, NB, out_dir=out, playground=pg, window=window)
+            ev, nu = E.build(label, NB, out_dir=out, playground=pg, window=window, full_text=full_text)
         calls["cached_after"] = [furl(f) for f in filings if E.header_path(furl(f), cache).exists()]
         return ev, nu, NB, calls, sorted(p.name for p in out.iterdir()), ev.attrs["dropped"]
 
@@ -407,35 +472,40 @@ def offline(NB):
     return False
 
 
-GOOD = fil("D1", "2022-06-07", "20220607080000", "20220602")
-NOHDR = fil("D2", "2022-09-13", "20220913080000", "20220908", cached=False)
-ev, nu, NBr, calls, files, dr = run_build("discovery", [GOOD, NOHDR], positional=True)
-check("discovery: built from its default window; one late people event, its two ordinary days, three files",
-      list(ev.row_id) == ["event|D1"] and ev.late.tolist() == [1] and len(nu) == 2 and files == ["dropped_discovery.csv", "events_discovery.csv", "nulls_discovery.csv"],
-      f"{list(ev.row_id)} {files}")
-check("discovery: cache only (the notebook is offline, no header was fetched) and the filing without a header is counted",
-      offline(NBr) and calls["header"] == [] and ev.attrs["counts"]["people_no_header"] == 1, str(ev.attrs["counts"]))
-check("discovery refuses a window into 2024 before reading anything (no playground files, no disclosure calls)",
-      refused(lambda: E.build("discovery", {**NBr, "SESSION": Session()}, playground=Path("/nonexistent"), window=("2023-12-01", "2024-01-31"))))
-check("discovery refuses 2026 even with both switches on",
-      refused(lambda: E.build("discovery", {**NBr, "RUN_OOS": True, "RUN_HOLDOUT": True}, playground=Path("/nonexistent"), window=("2026-03-01", "2026-03-31"))))
-
-ev, nu, NBr, calls, files, dr = run_build("dryrun", [fil("R1", "2023-09-12", "20230912080000", "20230907")])
-check("dryrun: default window 2023-07-01..2023-12-31, offline", list(ev.row_id) == ["event|R1"] and offline(NBr) and calls["header"] == [])
-check("dryrun refuses a window into 2024",
-      refused(lambda: E.build("dryrun", NBr, playground=Path("/nonexistent"), window=("2023-07-01", "2024-01-31"))))
-ev, nu, NBr, calls, files, dr = run_build("myrun", [fil("U1", "2022-06-07", "20220607080000", "20220602")], window=("2022-05-01", "2022-07-31"))
-check("an unnamed label with a window builds under the discovery rules",
-      list(ev.row_id) == ["event|U1"] and "events_myrun.csv" in files and refused(lambda: E.build("myrun", NBr, window=("2023-12-01", "2024-01-31"))))
-
-INS = [fil("I1", "2025-03-11", "20250311080000", "20250306"), fil("I2", "2025-12-31", "20251231170000", "20251229"),
-       fil("PR1", "2023-12-20", "20231220080000", "20231215")]
-ev, nu, NBr, calls, files, dr = run_build("insample", INS)
-check("insample: default window, offline, an entry on or after 2026-01-01 is dropped and counted (and the prior window is read for look-back only)",
-      list(ev.row_id) == ["event|I1"] and offline(NBr) and ev.attrs["counts"]["people_entry_on_or_after_2026-01-01"] == 1
-      and ev.t_0.max() < T("2026-01-01") and nu.t_0.max() < T("2026-01-01"), f"{list(ev.row_id)} {ev.attrs['counts']}")
-check("insample refuses a window that reaches 2026-01-01",
-      refused(lambda: E.build("insample", NBr, playground=Path("/nonexistent"), window=("2025-06-01", "2026-01-01"))))
+INS = [fil("I1", "2025-03-11", "20250311080000", "20250306"),                      # kept: late, 3 sessions
+       fil("I4", "2024-02-06", "20240206080000", "20240131"),                      # kept; one of its ordinary days has a gap before 2024
+       fil("I3", "2024-01-03", "20240103080000", "20231228"),                      # its gap starts 2023-12-27: dropped, counted
+       fil("I2", "2025-12-31", "20251231170000", "20251229"),                      # enters on or after 2026-01-01: dropped, counted
+       fil("I5", "2025-05-13", "20250513080000", "20250508", cached=False)]        # no cached header: counted
+ev, nu, NBr, calls, files, dr = run_build("insample", INS, positional=True)
+check("insample: kept events are I1 and I4; the 2023 gap, the 2026 entry and the missing header are each dropped and counted",
+      sorted(ev.accession_number) == ["I1", "I4"] and ev.attrs["counts"]["people_gap_reaches_before_2024-01-01"] == 1
+      and ev.attrs["counts"]["people_entry_on_or_after_2026-01-01"] == 1 and ev.attrs["counts"]["people_no_header"] == 1, str(ev.attrs["counts"]))
+check("insample: an ordinary day whose pseudo-gap starts before 2024 is dropped and counted; the rest keep their ids",
+      ev.attrs["counts"]["null_rows_gap_reaches_before_2024-01-01"] == 1 and ev.attrs["counts"]["null_rows_outside_allowed_other"] == 0
+      and len(nu) == 3 and nu.row_id.is_unique, f"{len(nu)} nulls, {ev.attrs['counts']}")
+check("insample: dropped_insample.csv lists the gap-before-2024 event with its reason",
+      dr.to_dict("list")["row_id"] == ["event|I3"] and dr.reason.tolist() == ["gap reaches before 2024-01-01"]
+      and list(dr.columns) == E.DROPPED_COLUMNS, str(dr.to_dict("list")))
+INS3 = [fil("I6", "2024-01-10", "20240110080000", "20231229"), fil("I7", "2024-01-25", "20240125080000", "20240122")]
+ev3_, nu3_, *_r, dr3_ = run_build("insample", INS3)
+check("insample pools: a filing dropped for its December gap still counts as a related earlier filing by its own (2024) filing date",
+      list(ev3_.accession_number) == ["I7"] and dr3_.reason.tolist() == ["gap reaches before 2024-01-01"]
+      and ev3_.cue_related_filing.tolist() == [1], f"{list(ev3_.accession_number)} {ev3_.cue_related_filing.tolist()}")
+check("insample: every t_pre, t_0 and gap start in events and nulls lies in [2024-01-01, 2026-01-01) and outside the sealed window",
+      not E.outside_allowed(ev, ["t_pre", "t_0", "gap_start"], "2024-01-01", "2026-01-01", SEALED).any()
+      and not E.outside_allowed(nu, ["t_pre", "t_0", "gap_start"], "2024-01-01", "2026-01-01", SEALED).any()
+      and ev.t_0.min() >= T("2024-01-01"))
+check("insample: no disclosure query reaches outside 2024-2025 (no 2022-23 look-back), cache only, three files",
+      calls["disclosures"] and all(s >= "2024-01-01" and e < "2026-01-01" for _, s, e in calls["disclosures"])
+      and offline(NBr) and calls["header"] == [] and files == ["dropped_insample.csv", "events_insample.csv", "nulls_insample.csv"], str(files))
+check("insample refuses a window that reaches 2026, starts before 2024 or overlaps the sealed window, before reading anything",
+      all(refused(lambda w=w, f=f: E.build("insample", {**NBr, "SESSION": Session(), **f}, playground=Path("/nonexistent"), window=w))
+          for w, f in ((("2025-06-01", "2026-01-01"), {}), (("2023-12-01", "2024-03-31"), {}), (("2023-06-01", "2023-08-31"), {}),
+                       (("2024-01-01", "2025-12-31"), {"HOLDOUT_START": "2025-03-01", "HOLDOUT_END": "2025-03-31"}))))
+ev2, nu2, *_ = run_build("insample", INS, window=("2024-07-01", "2025-12-31"), HOLDOUT_START="2024-02-01", HOLDOUT_END="2024-02-28")
+check("insample with a moved sealed window and a window that clears it: builds, and drops what touches the sealed window",
+      sorted(ev2.accession_number) == ["I1"] and not E.outside_allowed(nu2, ["t_pre", "t_0", "gap_start"], "2024-07-01", "2026-01-01", ("2024-02-01", "2024-02-28")).any())
 
 HOLD = [fil("H1", "2026-09-15", "20260915080000", "20260910", cached=False), fil("H2", "2026-09-22", "20260922080000", "20260917")]
 check("holdout without RUN_HOLDOUT is refused before anything is read or fetched",
@@ -452,7 +522,8 @@ ev, nu, NBr, calls, files, dr = run_build("holdout", HOLD, window=("2026-09-01",
 check("holdout: a header that cannot be fetched leaves the filing out and counted, not a crash",
       list(ev.row_id) == ["event|H2"] and ev.attrs["counts"]["people_no_header"] == 1)
 ev, nu, NBr, calls, files, dr = run_build("holdout", [fil("H3", "2023-07-18", "20230718080000", "20230713")], RUN_HOLDOUT=True)
-check("holdout without window= uses the notebook's HOLDOUT_START and HOLDOUT_END", list(ev.row_id) == ["event|H3"])
+check("holdout without window= uses the notebook's HOLDOUT_START and HOLDOUT_END (the judges' dates, whatever they are)",
+      list(ev.row_id) == ["event|H3"])
 check("holdout still refuses an unknown or missing switch value",
       refused(lambda: run_build("holdout", HOLD, window=("2026-09-01", "2026-09-30"), RUN_HOLDOUT="yes")))
 
@@ -462,6 +533,228 @@ check("oos without RUN_OOS is refused; RUN_HOLDOUT alone does not unlock it",
 ev, nu, NBr, calls, files, dr = run_build("oos", OOS, RUN_OOS=True)
 check("oos with RUN_OOS: the notebook's OOS window, cache only (offline, nothing fetched)",
       list(ev.row_id) == ["event|O1"] and offline(NBr) and calls["header"] == [] and ev.t_0.min() >= T("2026-01-01"))
+
+
+# ---- Full-text variant: parsing -----------------------------------------------------------------------------------------------
+FD = "2025-03-11"
+raw = sub(("8-K", "x8k"), ("EX-99.1", "x99"), ("EX-101.INS", "<xbrl/>"), ("GRAPHIC", "begin 644 logo.jpg"), ("EX-10.1", "agreement"), ("8-K/A", "amend"))
+check("split_documents reads every document type; keep_documents keeps the 8-K, 8-K/A and EX-99 exhibits only",
+      [t for t, _ in E.split_documents(raw)] == ["8-K", "EX-99.1", "EX-101.INS", "GRAPHIC", "EX-10.1", "8-K/A"]
+      and [t for t, _ in E.split_documents(E.keep_documents(raw))] == ["8-K", "EX-99.1", "8-K/A"]
+      and "begin 644" not in E.keep_documents(raw) and "agreement" not in E.keep_documents(raw))
+check("a truncated last document is still read", [t for t, _ in E.split_documents(raw[:raw.index("</DOCUMENT>") + 11] + "<DOCUMENT>\n<TYPE>EX-99.1\n<TEXT>\npart")] == ["8-K", "EX-99.1"])
+check("html_to_text drops head, style, script and the inline-XBRL header, decodes entities, turns tags into spaces",
+      E.normalize(E.html_to_text("<html><head><title>March 7, 2025 announced</title></head><body><style>p{}</style>"
+                                 "<ix:header><ix:hidden>March 6, 2025 announced</ix:hidden></ix:header>"
+                                 "<p>On&#160;March&#160;7,<b> 2025</b>, we&#8217;re <i>previously</i>announced</p><script>var a=1</script></body></html>"))
+      == "on march 7, 2025 , we’re previously announced")
+B_HIDDEN = ("<html><head><title>Mar 7, 2025 announced</title></head><body><ix:header><ix:hidden>March 7, 2025 announced</ix:hidden>"
+            "</ix:header><p>On March&#160;12, 2025, the Company announced that Ms. Y will retire.</p></body></html>")
+B_DATED = "<p>On March&#160;7, 2025, the Company announced that Ms. Y will retire.</p>"
+B_WORDING = "<p>As <b>previously</b> announced, Mr. X will step down.</p>"
+c = E.full_text_cues(sub(("8-K", B_HIDDEN)), FD)
+check("full text: a date only in the head or hidden XBRL, or a later date, does not fire the dated-prior cue",
+      c == {"full_text_status": "ok", "cue_dated_prior_full": 0, "cue_prior_wording_full": 0, "cue_exhibit_dated_prior_full": 0}, str(c))
+c = E.full_text_cues(sub(("8-K", B_DATED)), FD)
+check("full text: an earlier date next to 'announced' fires the dated-prior cue only",
+      (c["cue_dated_prior_full"], c["cue_prior_wording_full"], c["cue_exhibit_dated_prior_full"]) == (1, 0, 0), str(c))
+c = E.full_text_cues(sub(("8-K", B_WORDING)), FD)
+check("full text: 'previously' split by a tag still fires the prior-wording cue", (c["cue_dated_prior_full"], c["cue_prior_wording_full"]) == (0, 1), str(c))
+EX_PRIOR = "<html><body><p>Exhibit 99.1</p><p>CUPERTINO, Calif., March 7, 2025 &#8212; the company announced a new officer.</p></body></html>"
+c = E.full_text_cues(sub(("8-K", "<p>Item 5.02 departure.</p>"), ("EX-99.1", EX_PRIOR)), FD)
+check("full text: an EX-99 press release dated before the filing fires the exhibit flag (and the dated-prior cue)",
+      (c["cue_exhibit_dated_prior_full"], c["cue_dated_prior_full"], c["full_text_status"]) == (1, 1, "ok"), str(c))
+c = E.full_text_cues(sub(("8-K", "x"), ("EX-99.1", EX_PRIOR.replace("March 7, 2025", "March 11, 2025"))), FD)
+check("full text: a press release dated the filing date is not dated before it", (c["cue_exhibit_dated_prior_full"], c["cue_dated_prior_full"]) == (0, 0), str(c))
+c = E.full_text_cues(sub(("8-K", "x"), ("EX-99.1", "<p>Effective April 1, 2025 the board announced a change. Dated March 7, 2025.</p>")), FD)
+check("full text: the exhibit flag reads the FIRST date in its head (a later effective date first means no flag)", c["cue_exhibit_dated_prior_full"] == 0, str(c))
+c = E.full_text_cues(sub(("8-K", "x"), ("EX-99.1", "<p>" + "x " * 1000 + " March 7, 2025</p>")), FD)
+check("full text: a date beyond the first 1,500 characters of the exhibit is not its dateline", c["cue_exhibit_dated_prior_full"] == 0)
+c = E.full_text_cues(sub(("8-K", "<p>zz effective March 7, 2025</p>"), ("EX-99.1", "<p>announced the appointment</p>")), FD)
+check("full text: the date at the end of one document and a keyword at the start of the next are not 'near' each other",
+      (c["cue_dated_prior_full"], c["cue_exhibit_dated_prior_full"]) == (0, 0), str(c))
+c = E.full_text_cues(sub(("EX-99.1", EX_PRIOR), ("EX-10.1", B_DATED)), FD)
+check("full text: no 8-K document gives status 'empty'; other exhibits are never read", c["full_text_status"] == "empty" and c["cue_dated_prior_full"] == 1, str(c))
+check("full text of an empty or header-only submission is 'empty'", E.full_text_cues("<SEC-HEADER>x</SEC-HEADER>", FD)["full_text_status"] == "empty")
+
+
+# ---- Full-text variant: the polite fetcher (a scripted fake network, no real requests) --------------------------------------
+class FakeResp:
+    def __init__(self, status=200, body=b"", headers=None):
+        self.status_code, self.body, self.headers = status, body, headers or {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def iter_content(self, n):
+        for i in range(0, len(self.body), n):
+            yield self.body[i:i + n]
+
+
+class Net:
+    """Scripted responses per URL (the last repeats); records each request with its fake time, and every sleep."""
+    def __init__(self, script):
+        self.script, self.log, self.sleeps, self.t = {k: list(v) for k, v in script.items()}, [], [], 0.0
+
+    def get(self, url, headers=None, timeout=None, stream=None):
+        self.log.append((url, dict(headers or {}), self.t))
+        q = self.script[url]
+        r = q.pop(0) if len(q) > 1 else q[0]
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    def sleep(self, s):
+        self.sleeps.append(s)
+        self.t += s
+
+    def clock(self):
+        return self.t
+
+
+UA = "Test Agent test@example.org"
+OK = lambda body="<p>x</p>": FakeResp(200, sub(("8-K", body)).encode("latin-1"))       # noqa: E731
+ur = lambda k: f"https://www.sec.gov/Archives/edgar/data/1/{k}.txt"                      # noqa: E731
+
+
+def make_fetcher(net, tmp, **kw):
+    return E.SecFetcher(UA, tmp, get=net.get, sleep=net.sleep, clock=net.clock, **kw)
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    net = Net({ur(i): [OK()] for i in range(9)})
+    fx = make_fetcher(net, tmp)
+    got = [fx.fetch(ur(i)) for i in range(9)]
+    times_ = [t for _, _, t in net.log]
+    gaps = np.diff(times_)
+    check("fetcher: nine filings take nine requests, never faster than 8 per second, with the real User-Agent",
+          fx.requests == 9 and all(g is not None for g in got) and gaps.min() >= 0.125 - 1e-9 and 8 / (times_[-1] - times_[0]) <= 8 + 1e-9
+          and all(h["User-Agent"] == UA for _, h, _ in net.log), f"min gap {gaps.min():.3f}s")
+    check("fetcher: each document is cached as sec_full_<sha1(filing_url)>.txt, trimmed, and never fetched again",
+          E.full_text_path(ur(0), tmp).name == "sec_full_" + hashlib.sha1(ur(0).encode()).hexdigest() + ".txt"
+          and E.full_text_path(ur(0), tmp).exists() and fx.fetch(ur(0)) == got[0] and len(net.log) == 9)
+check("fetcher: the rate is capped at 8 per second however high max_rps is set",
+      abs(E.SecFetcher(UA, ".", max_rps=100).interval - 0.125) < 1e-12 and abs(E.SecFetcher(UA, ".", max_rps=2).interval - 0.5) < 1e-12)
+check("fetcher: an empty or placeholder SEC_USER_AGENT is refused",
+      all(refused(lambda u=u: E.SecFetcher(u, "."), ValueError) for u in ("", "  ", "your@email.edu", "team-name x")))
+with tempfile.TemporaryDirectory() as tmp:
+    net = Net({ur("a"): [FakeResp(503), OK()], ur("b"): [FakeResp(429, headers={"Retry-After": "3"}), OK()],
+               ur("c"): [_requests.ConnectionError("x"), _requests.Timeout("y"), _requests.ConnectionError("z")],
+               ur("d"): [FakeResp(503)], ur("e"): [FakeResp(404)]})
+    fx = make_fetcher(net, Path(tmp))
+    ra, rb = fx.fetch(ur("a")), fx.fetch(ur("b"))
+    check("fetcher: a 503 is retried after a backoff of 1 s, and a 429 waits for its Retry-After",
+          ra is not None and rb is not None and 1 in net.sleeps and 3.0 in net.sleeps and [u for u, _, _ in net.log].count(ur("a")) == 2)
+    n0 = len(net.sleeps)
+    rc, rd, re_ = fx.fetch(ur("c")), fx.fetch(ur("d")), fx.fetch(ur("e"))
+    check("fetcher: connection errors and 5xx are tried 3 times with backoff 1, 2, 4 and then given up; a 404 is not retried",
+          rc is None and rd is None and re_ is None and [u for u, _, _ in net.log].count(ur("c")) == 3
+          and [u for u, _, _ in net.log].count(ur("d")) == 3 and [u for u, _, _ in net.log].count(ur("e")) == 1
+          and {1, 2, 4} <= set(net.sleeps[n0:]) and fx.failures == 3)
+with tempfile.TemporaryDirectory() as tmp:
+    net = Net({ur(i): [FakeResp(404)] for i in range(5)} | {ur("ok"): [OK()]} | {ur(i): [FakeResp(404)] for i in range(10, 15)})
+    fx = make_fetcher(net, Path(tmp))
+    stopped = None
+    try:
+        for i in range(5):
+            fx.fetch(ur(i))
+    except RuntimeError as e:
+        stopped = (i, str(e))
+    check("fetcher: it stops with a RuntimeError at the fifth failed filing in a row (never hammer the SEC)",
+          stopped is not None and stopped[0] == 4 and "5 filings in a row" in stopped[1], str(stopped))
+    fx2 = make_fetcher(Net({ur(i): [FakeResp(404)] for i in range(10, 15)} | {ur("ok"): [OK()]}), Path(tmp) / "b")
+    for i in (10, 11, 12, 13):
+        fx2.fetch(ur(i))
+    fx2.fetch(ur("ok"))
+    fx2.fetch(ur(14))
+    check("fetcher: a success resets the streak (four failures, a success, one more failure does not stop)", fx2.failures == 1)
+with tempfile.TemporaryDirectory() as tmp:
+    big = sub(("8-K", "<p>" + "a" * 300_000 + "</p>"))
+    net = Net({ur("big"): [FakeResp(200, big.encode("latin-1"))]})
+    fx = make_fetcher(net, Path(tmp), max_bytes=70_000)
+    txt = fx.fetch(ur("big"))
+    check("fetcher: a response is read only up to max_bytes", txt is not None and len(txt) < 200_000 and "</p>" not in txt[-300:] or len(txt) < len(big), str(len(txt)))
+
+
+# ---- Full-text variant: add_full_text, the guards and build(full_text=) ----------------------------------------------------------
+def events_frame():
+    rows = [("a", "2025-03-11", 1, 0, 1, "people"), ("b", "2025-03-12", 0, 0, 0, "people"), ("c", "2025-03-13", 1, 1, 0, "people"),
+            ("d", "2025-03-14", 1, 0, 0, "people"), ("e", "2025-03-17", 1, 0, 0, "placebo"), ("f", "2025-03-18", 1, 0, 0, "placebo")]
+    ev = pd.DataFrame(rows, columns=["accession_number", "filing_date", "late", "earnings_excluded", "cue_related_filing", "group"])
+    ev["filing_date"], ev["T"], ev["row_id"] = pd.to_datetime(ev["filing_date"]), 0, "event|" + ev["accession_number"]
+    return ev
+
+
+URLS = {k: ur(k) for k in "abcdef"}
+NBF = {"RUN_HOLDOUT": False, "SEC_USER_AGENT": UA}
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    cached = {"a": sub(("8-K", B_DATED)), "e": sub(("EX-99.1", EX_PRIOR)), "f": sub(("8-K", "<p>x</p>"), ("EX-99.1", EX_PRIOR))}
+    for k, raw_ in cached.items():
+        E.full_text_path(URLS[k], tmp).write_text(E.keep_documents(raw_))
+    ev0 = events_frame()
+    out = E.add_full_text(ev0, URLS, NBF, "insample", cache_dir=tmp)
+    check("add_full_text: existing columns untouched, FULL_COLUMNS appended, the input table unchanged",
+          out[list(ev0.columns)].equals(ev0) and list(out.columns) == list(ev0.columns) + E.FULL_COLUMNS and list(ev0.columns) == list(events_frame().columns))
+    o = out.set_index("accession_number")
+    check("add_full_text: only late filings without an earnings exclusion are read; the rest are not_run with empty cues",
+          o.full_text_status.to_dict() == {"a": "ok", "b": "not_run", "c": "not_run", "d": "missing", "e": "empty", "f": "ok"}
+          and o.loc[["b", "c", "d", "e"], E.FULL_COLUMNS[1:]].isna().all().all())
+    check("add_full_text: cues, the related cue copied, T_full (three plan cues) and T_full4 (plus the exhibit flag)",
+          o.loc["a", E.FULL_COLUMNS[1:]].tolist() == [1, 0, 1, 0, 2, 2] and o.loc["f", E.FULL_COLUMNS[1:]].tolist() == [1, 0, 0, 1, 1, 2],
+          f"{o.loc['a', E.FULL_COLUMNS[1:]].tolist()} {o.loc['f', E.FULL_COLUMNS[1:]].tolist()}")
+    fs = E.full_text_summary(out)
+    check("full_text_summary counts the kept late filings by status and cue",
+          fs["status"] == {"ok": 2, "missing": 1, "empty": 1} and fs["people"]["filings"] == 1 and fs["people"]["cue_dated_prior_full"] == 1
+          and fs["placebo"]["filings"] == 1 and fs["placebo"]["cue_exhibit_dated_prior_full"] == 1, str(fs))
+    net = Net({URLS["d"]: [OK(B_WORDING)]})
+    fx = make_fetcher(net, tmp)
+    out2 = E.add_full_text(ev0, URLS, NBF, "insample", allow_fetch=True, cache_dir=tmp, fetcher=fx)
+    o2 = out2.set_index("accession_number")
+    check("add_full_text with fetching: only the filing missing from the cache is requested, then cached",
+          len(net.log) == 1 and net.log[0][0] == URLS["d"] and o2.loc["d", "full_text_status"] == "ok" and o2.loc["d", "cue_prior_wording_full"] == 1
+          and E.full_text_path(URLS["d"], tmp).exists() and o2.loc["a", "T_full"] == 2)
+    out3 = E.add_full_text(ev0, URLS, NBF, "insample", cache_dir=tmp)
+    check("add_full_text offline then reads the cached document too", out3.set_index("accession_number").loc["d", "full_text_status"] == "ok")
+
+    # the strict data rule: nothing is fetched or read for 2022-23
+    net = Net({URLS[k]: [OK()] for k in "abcdef"})
+    old = events_frame().assign(filing_date=lambda d: d.filing_date - pd.DateOffset(years=2))
+    check("full text refuses discovery, dryrun, oos and unnamed labels, and holdout without its switch, fetching nothing",
+          all(refused(lambda l=l: E.add_full_text(old, URLS, NBF, l, allow_fetch=True, cache_dir=tmp, fetcher=make_fetcher(net, tmp)))
+              for l in ("discovery", "dryrun", "oos", "myrun", "holdout")) and net.log == [])
+    check("insample full text refuses a filing dated before 2024-01-01 and fetches nothing",
+          refused(lambda: E.add_full_text(old, URLS, NBF, "insample", allow_fetch=True, cache_dir=tmp, fetcher=make_fetcher(net, tmp)), text="2024-01-01")
+          and net.log == [])
+    check("holdout full text runs with RUN_HOLDOUT True, on any dates",
+          E.add_full_text(old, URLS, {**NBF, "RUN_HOLDOUT": True}, "holdout", cache_dir=tmp).full_text_status.eq("not_run").sum() == 2)
+
+INS2 = [fil("I1", "2025-03-11", "20250311080000", "20250306"), fil("I4", "2024-02-06", "20240206080000", "20240131")]
+ev0, *_ = run_build("insample", INS2)
+ev1, nu1, NBr, calls, files, dr = run_build("insample", INS2, full_text="cache", full_docs={"I1": sub(("8-K", B_DATED), ("EX-99.1", EX_PRIOR))})
+o = ev1.set_index("accession_number")
+check("build(full_text='cache') on insample: the full-text columns are added and every other column is identical to the plain build",
+      ev1[E.EVENT_COLUMNS].reset_index(drop=True).equals(ev0[E.EVENT_COLUMNS].reset_index(drop=True)) and list(ev1.columns) == E.EVENT_COLUMNS + E.FULL_COLUMNS
+      and o.loc["I1", "full_text_status"] == "ok" and o.loc["I1", "cue_dated_prior_full"] == 1 and o.loc["I1", "cue_exhibit_dated_prior_full"] == 1
+      and o.loc["I4", "full_text_status"] == "missing", str(o[E.FULL_COLUMNS].to_dict("index")))
+check("build(full_text=) refuses before reading anything for oos, retired labels and a bad mode; holdout needs its switch",
+      refused(lambda: E.build("oos", {"RUN_OOS": True}, playground=Path("/nonexistent"), window=("2026-03-01", "2026-03-31"), full_text="cache"), text="never for 'oos'")
+      and refused(lambda: E.build("dryrun", None, full_text="cache"), text=RETIRED)
+      and refused(lambda: E.build("insample", {**NB0}, playground=Path("/nonexistent"), full_text="sometimes"), ValueError)
+      and refused(lambda: E.build("holdout", {"RUN_HOLDOUT": False}, playground=Path("/nonexistent"), window=("2026-09-01", "2026-09-30"), full_text="cache")))
+ev3, *_ = run_build("holdout", [fil("H3", "2026-09-15", "20260915080000", "20260910")], window=("2026-09-01", "2026-09-30"), RUN_HOLDOUT=True,
+                    full_text="cache", full_docs={"H3": sub(("8-K", B_WORDING))})
+check("build(full_text='cache') on holdout (RUN_HOLDOUT True): the same columns", ev3.full_text_status.tolist() == ["ok"] and ev3.cue_prior_wording_full.tolist() == [1])
+# build(full_text='fetch') reaches sec.gov only through SecFetcher (here: the scripted fake), once per uncached late filing
+_requests.get = Net({furl(INS2[0]): [OK(B_DATED)], furl(INS2[1]): [OK(B_WORDING)]}).get
+ev4, *_ = run_build("insample", INS2, full_text="fetch")
+_requests.get = _no_network
+check("build(full_text='fetch'): uncached late filings are fetched through requests.get (the scripted fake) and read",
+      sorted(ev4.full_text_status) == ["ok", "ok"] and ev4.set_index("accession_number").loc["I1", "cue_dated_prior_full"] == 1)
 
 print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILED: {FAILS}")
 sys.exit(1 if FAILS else 0)

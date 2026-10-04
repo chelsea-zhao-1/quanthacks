@@ -1,53 +1,48 @@
 """Figures for the old-news test, in the notebook's own style (section 7 palette and axes).
 
-    1  fade_curve     mean outcome by horizon, old news versus surprise news, 95% bootstrap intervals
-    2  walkthrough    one event: event date, gap, filing, entry, and the option-implied versus realised move
+    1  fade_curve     the outcome by horizon: old and surprise news, and old minus surprise with its 95% interval
+    2  walkthrough    one filing end to end: event date, gap, filing, entry, option-implied versus realised move
     3  placebo        old minus surprise for the people-news filings, next to the same on the placebo filings
 
-Outcome (test plan): Y_h = log(RV_h / IV_0), each event minus the mean of its matched ordinary days. Below
-zero means realised volatility fell short of implied by more than on that stock's ordinary days.
+Nothing is recomputed here. Figures 1 and 3 plot results_<label>/profile.csv exactly as src/oldnews/tests.py wrote
+it (group means, the old-minus-surprise effect, its bootstrap 95% interval, the permutation p-value and the
+Benjamini-Hochberg q). That table has an interval for the difference only, so the group means are drawn without
+bands. The outcome is Y_h = log(RV_h / IV_0), each event minus the mean of its matched ordinary days; below zero
+means realised volatility fell short of implied by more than on that stock's ordinary days. Horizons 42 and 63
+sessions have no observations in the 1-month bucket (the option expires first); they stay on the axis, marked
+n = 0, because the fixed horizons are reported in full.
 
-The samples are the stats module's own (src/oldnews/tests.py, `universe` and `cell`): late filings, no earnings
-filing nearby, a usable score, a usable outcome in the 1-month bucket on the 3% put's row, and at least one
-usable matched ordinary day. The placebo figure plots the stats module's horizon profile (H1 and P) when it is
-given, so every plotted difference, interval and p-value is a reported number; the fade curve's group means
-are checked against the same table.
-
-The walkthrough event is chosen without looking at outcomes: the old-news event whose total score S is
-closest to the median S of old-news events (earliest entry on ties).
+Figure 2 shows one illustrative filing, chosen by a rule that never looks at outcomes (`walkthrough_candidates`):
+among the old-news filings in the primary test's sample that have all three math inputs, the one whose gap length
+is closest to the median gap length of that set (earliest entry, then row id, on ties).
 """
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-SEED = 20261003
-N_BOOT = 10_000
 HORIZONS = ["1", "2", "3", "5", "10", "21", "42", "63", "expiry"]
 PRIMARY_H, PRIMARY_BUCKET, PRIMARY_OTM = "10", "1m", 3
 
 # The notebook's tokens (section 7), so these figures sit beside its own.
 INK, INK2, MUTED, GRID, AXIS, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb"
 OLD, SURPRISE = "#2a78d6", "#eb6834"          # categorical slots 1 and 2 (validated: CVD dE 24.7, contrast >= 3:1)
-GROUP_LABEL = {True: "Old news", False: "Surprise news"}
+LABEL_BOX = dict(boxstyle="square,pad=0.15", facecolor=SURFACE, edgecolor="none")
 
 
 @dataclass
 class Inputs:
-    """One run's tables (00_shared.md columns). `labels` is classify's table (every event row with its inputs,
-    M, T, S, `old` and `scored`); `profile` is tests.run()["profile"] when the stats step has run."""
-    events: pd.DataFrame
-    nulls: pd.DataFrame
-    outcome: pd.DataFrame
-    labels: pd.DataFrame
-    gap: pd.DataFrame | None = None
-    profile: pd.DataFrame | None = None
+    """The tables a run produced. `profile` is tests.run()["profile"] (results_<label>/profile.csv); the rest only
+    serve the walkthrough: `classified` (classify's table), `outcome` and `nulls` (00_shared.md columns)."""
+    profile: pd.DataFrame
+    classified: pd.DataFrame | None = None
+    outcome: pd.DataFrame | None = None
+    nulls: pd.DataFrame | None = None
 
 
 def flag(s: pd.Series) -> pd.Series:
@@ -66,110 +61,50 @@ def norm_h(h) -> str:
 
 
 # ---------------------------------------------------------------------------------------------------------
-# Data
+# Data, straight from the tables
 # ---------------------------------------------------------------------------------------------------------
-def event_table(data: Inputs, group: str = "people") -> pd.DataFrame:
-    """The test's filings for one group (people | placebo): late, no earnings filing nearby, usable score."""
-    c = data.labels
-    if "group" not in c:                                  # a bare label table: bring in the event columns
-        c = data.events.merge(c, on="row_id", how="inner", suffixes=("", "_label"))
-    scored = flag(c["scored"]) if "scored" in c else c["old"].notna()
-    ev = c[(c["group"] == group) & flag(c["late"]) & ~flag(c["earnings_excluded"]) & scored].copy()
-    ev["old"] = flag(ev["old"])
-    return ev.reset_index(drop=True)
+def read_tables(label: str, data_dir: Path) -> Inputs:
+    """Read what a finished run wrote (results_<label>/profile.csv and the tables behind the walkthrough)."""
+    from oldnews import pipeline
+
+    pipeline.check_label(label)
+    d = Path(data_dir)
+    kw = dict(keep_default_na=False, na_values=["", "nan", "NaN"])
+    return Inputs(profile=pd.read_csv(d / f"results_{label}" / "profile.csv", dtype={"horizon": str}, **kw),
+                  classified=pd.read_csv(d / f"classified_{label}.csv", **kw),
+                  outcome=primary_rows(pd.read_csv(d / f"outcome_{label}.csv", **kw)),
+                  nulls=pd.read_csv(d / f"nulls_{label}.csv", **kw))
 
 
-def outcome_y(outcome: pd.DataFrame, bucket: str = PRIMARY_BUCKET, otm: int = PRIMARY_OTM) -> pd.DataFrame:
-    """One usable y per (row_id, horizon), from the bucket's rows for the primary put (usable also needs the
-    put to have traded at entry, so the 3% row is the test's own cell)."""
-    o = outcome[(outcome["bucket"].astype(str) == bucket) & (pd.to_numeric(outcome["otm"], errors="coerce") == otm)
-                & flag(outcome["usable"])].copy()
-    o["horizon"] = o["horizon"].map(norm_h)
-    o["y"] = pd.to_numeric(o["y"], errors="coerce")
-    o = o[np.isfinite(o["y"])].drop_duplicates(["row_id", "horizon"])
-    return o.reindex(columns=["row_id", "horizon", "y", "iv0", "rv", "entry_date", "exit_date"])
-
-
-def matched(data: Inputs, group: str = "people", bucket: str = PRIMARY_BUCKET) -> pd.DataFrame:
-    """Per event and horizon: d = event y minus the mean y of its usable matched ordinary days."""
-    ev = event_table(data, group)
-    y = outcome_y(data.outcome, bucket)
-    ey = ev[["row_id", "old"]].merge(y[["row_id", "horizon", "y"]], on="row_id")
-    ny = (data.nulls[["row_id", "event_row_id"]].merge(y[["row_id", "horizon", "y"]], on="row_id")
-          .groupby(["event_row_id", "horizon"], as_index=False)["y"].mean().rename(columns={"y": "y_null"}))
-    m = ey.merge(ny, left_on=["row_id", "horizon"], right_on=["event_row_id", "horizon"], how="inner")
-    m["d"] = m["y"] - m["y_null"]
-    return m.dropna(subset=["d"])[["row_id", "old", "horizon", "y", "y_null", "d"]].reset_index(drop=True)
-
-
-def _boot_means(x: np.ndarray, rng: np.random.Generator, n_boot: int) -> np.ndarray:
-    return x[rng.integers(0, len(x), size=(n_boot, len(x)))].mean(axis=1)
-
-
-def profile(m: pd.DataFrame, n_boot: int = N_BOOT, seed: int = SEED) -> pd.DataFrame:
-    """Mean d by group and horizon with a 95% bootstrap interval of the mean."""
-    rng, rows = np.random.default_rng(seed), []
-    for old in (True, False):
-        for h in HORIZONS:
-            x = m.loc[(m["old"] == old) & (m["horizon"] == h), "d"].to_numpy(float)
-            lo = hi = np.nan
-            if len(x) >= 2:
-                lo, hi = np.percentile(_boot_means(x, rng, n_boot), [2.5, 97.5])
-            rows.append({"old": old, "horizon": h, "n": len(x), "mean": x.mean() if len(x) else np.nan,
-                         "ci_lo": lo, "ci_hi": hi})
-    return pd.DataFrame(rows)
-
-
-def difference(m: pd.DataFrame, n_boot: int = N_BOOT, seed: int = SEED) -> pd.DataFrame:
-    """Old minus surprise by horizon, each group resampled on its own, with a 95% bootstrap interval
-    (used only when the stats module's profile is not available)."""
-    rng, rows = np.random.default_rng(seed), []
-    for h in HORIZONS:
-        a = m.loc[m["old"] & (m["horizon"] == h), "d"].to_numpy(float)
-        b = m.loc[~m["old"] & (m["horizon"] == h), "d"].to_numpy(float)
-        row = {"horizon": h, "n_old": len(a), "n_surprise": len(b), "diff": np.nan, "ci_lo": np.nan,
-               "ci_hi": np.nan, "p": np.nan}
-        if len(a) >= 2 and len(b) >= 2:
-            boot = _boot_means(a, rng, n_boot) - _boot_means(b, rng, n_boot)
-            row.update(diff=a.mean() - b.mean(), ci_lo=np.percentile(boot, 2.5), ci_hi=np.percentile(boot, 97.5))
-        rows.append(row)
-    return pd.DataFrame(rows)
+def primary_rows(outcome: pd.DataFrame) -> pd.DataFrame:
+    """The outcome rows of the primary test's cell: the 1-month bucket, the 3% put."""
+    return outcome[(outcome["bucket"].astype(str) == PRIMARY_BUCKET) & (pd.to_numeric(outcome["otm"]) == PRIMARY_OTM)]
 
 
 def from_profile(prof: pd.DataFrame, test: str) -> pd.DataFrame:
-    """The stats module's horizon profile for one test (H1 or P) in this module's difference format."""
+    """One test's rows from the stats module's horizon profile, indexed by horizon (all nine, in order)."""
     t = prof[prof["test"] == test].copy()
     t["horizon"] = t["horizon"].map(norm_h)
-    t = t.rename(columns={"effect": "diff", "n_comp": "n_surprise"})      # p: one-sided for H1, two-sided for P
-    return t.reindex(columns=["horizon", "n_old", "n_surprise", "diff", "ci_lo", "ci_hi", "p", "q_bh"])
+    keep = ["n", "n_old", "n_comp", "mean_old", "mean_comp", "effect", "ci_lo", "ci_hi", "p", "q_bh"]
+    return t.set_index("horizon").reindex(HORIZONS)[keep].apply(pd.to_numeric, errors="coerce")
 
 
-def check_against(prof_groups: pd.DataFrame, prof: pd.DataFrame) -> None:
-    """Warn if the fade curve's group means differ from the stats module's H1 means (same sample, same d)."""
-    t = prof[prof["test"] == "H1"].assign(horizon=lambda d: d["horizon"].map(norm_h)).set_index("horizon")
-    for old, col in ((True, "mean_old"), (False, "mean_comp")):
-        mine = prof_groups[prof_groups["old"] == old].set_index("horizon")["mean"]
-        both = pd.concat([mine, t[col]], axis=1, keys=["mine", "stats"]).dropna()
-        if len(both) and not np.allclose(both["mine"], both["stats"], atol=1e-9):
-            warnings.warn(f"fade curve {GROUP_LABEL[old]} means differ from tests.py's H1 {col}; check the samples")
-
-
-def pick_walkthrough(data: Inputs) -> pd.Series | None:
-    """The old-news primary event whose S is closest to the median S of old-news events (no outcome used,
-    except that its 1-month, 10-session outcome must exist so the figure is complete)."""
-    ev = event_table(data, "people")
-    ev = ev[ev["old"]]
-    y = outcome_y(data.outcome)
-    y10 = y[y["horizon"] == PRIMARY_H].drop(columns="horizon")
-    ev = ev.drop(columns=[c for c in y10.columns if c != "row_id" and c in ev]).merge(y10, on="row_id", how="inner")
+def walkthrough_candidates(c: pd.DataFrame, outcome: pd.DataFrame, nulls: pd.DataFrame) -> pd.DataFrame:
+    """Old-news filings in the primary test's sample with all three math inputs, in the order of the rule: gap
+    length closest to the median gap length of the set, then earliest entry, then row id. No outcome enters the
+    order; an outcome must merely exist (the h = 10 outcome of the 1-month, 3% put row, and a matched ordinary day,
+    as in the test) so the figure is complete."""
+    o = outcome.assign(horizon=outcome["horizon"].map(norm_h))
+    ok = o[(o["horizon"] == PRIMARY_H) & flag(o["usable"]) & np.isfinite(pd.to_numeric(o["y"], errors="coerce"))]
+    has_null = set(nulls.loc[nulls["row_id"].isin(ok["row_id"]), "event_row_id"])
+    ev = c[(c["group"] == "people") & flag(c["late"]) & ~flag(c["earnings_excluded"]) & flag(c["scored"])
+           & flag(c["old"]) & (pd.to_numeric(c["n_inputs"]) == 3) & c["row_id"].isin(ok["row_id"]) & c["row_id"].isin(has_null)]
     if ev.empty:
-        return None
-    if "S" in ev and ev["S"].notna().any():
-        ev = ev.assign(_dist=(pd.to_numeric(ev["S"]) - pd.to_numeric(ev["S"]).median()).abs())
-        ev = ev.sort_values(["_dist", "t_0"])
-    else:
-        ev = ev.sort_values("t_0")
-    return ev.iloc[0].drop(labels=["_dist"], errors="ignore")
+        return ev
+    ev = ev.merge(ok[["row_id", "iv0", "rv", "y", "entry_date", "exit_date"]], on="row_id", how="left")
+    ev = ev.assign(_dist=(pd.to_numeric(ev["n_gap"]) - pd.to_numeric(ev["n_gap"]).median()).abs(),
+                   _t0=pd.to_datetime(ev["t_0"]))
+    return ev.sort_values(["_dist", "_t0", "row_id"]).drop(columns=["_dist", "_t0"]).reset_index(drop=True)
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -193,6 +128,13 @@ def style(ax, title: str = "", xlabel: str = "", ylabel: str = "") -> None:
     ax.set_ylabel(ylabel, color=INK2, fontsize=9)
 
 
+def _under_title(ax, note: str) -> None:
+    """A one-line note between a panel's title and its plot area, where no data can collide with it."""
+    ax.set_title(ax.get_title(loc="left"), loc="left", color=INK, fontsize=11, fontweight="bold", pad=24)
+    ax.annotate(note, (0, 1), xycoords="axes fraction", xytext=(0, 7), textcoords="offset points", ha="left",
+                va="bottom", fontsize=8.5, color=INK2)
+
+
 def _headline(fig, title: str, subtitle: str) -> float:
     """Title and subtitle at the top left; returns the figure fraction left for the axes below them."""
     h = fig.get_figheight()
@@ -201,11 +143,18 @@ def _headline(fig, title: str, subtitle: str) -> float:
     return 1 - (0.36 + 0.21 * (subtitle.count("\n") + 1) - 0.25) / h     # tight_layout adds its own padding
 
 
-LABEL_BOX = dict(boxstyle="square,pad=0.15", facecolor=SURFACE, edgecolor="none")
+def _tick_labels(t: pd.DataFrame, second: str, third: str) -> list[str]:
+    """Horizon on the first line, the group sizes under it (n = 0 where the 1-month option has expired)."""
+    labels = []
+    for h, r in t.iterrows():
+        n_old, n_comp = r["n_old"], r["n_comp"]
+        sizes = "n = 0" if not np.isfinite(r["n"]) or r["n"] == 0 else f"{int(n_old)}|{int(n_comp)}"
+        labels.append(f"{'exp' if h == 'expiry' else h}\n{sizes}")
+    return labels
 
 
-def _horizon_axis(ax, x: np.ndarray, primary: bool = True) -> None:
-    ax.set_xticks(x, [h if h != "expiry" else "exp" for h in HORIZONS])
+def _horizon_axis(ax, x: np.ndarray, t: pd.DataFrame, primary: bool = True) -> None:
+    ax.set_xticks(x, _tick_labels(t, "old", "surprise"))
     ax.axhline(0, color=MUTED, linewidth=0.8, zorder=1)
     if primary:
         i = HORIZONS.index(PRIMARY_H)
@@ -214,42 +163,44 @@ def _horizon_axis(ax, x: np.ndarray, primary: bool = True) -> None:
                     textcoords="offset points", ha="center", va="top", fontsize=8, color=INK2)
 
 
-def _line(ax, x, mean, lo, hi, color: str, label: str) -> None:
-    ax.fill_between(x, lo, hi, color=color, alpha=0.10, linewidth=0, zorder=2)
-    ax.plot(x, mean, color=color, linewidth=2, marker="o", markersize=7, markeredgecolor=SURFACE,
-            markeredgewidth=1.5, solid_capstyle="round", solid_joinstyle="round", label=label, zorder=3)
+def _line(ax, x, mean, color: str, label: str = "", lo=None, hi=None) -> None:
+    if lo is not None:
+        ax.fill_between(x, lo, hi, color=color, alpha=0.12, linewidth=0, zorder=2)
+        ax.vlines(x, lo, hi, color=color, linewidth=1.2, zorder=2)
+    ax.plot(x, mean, color=color, linewidth=2, marker="o", markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.5,
+            solid_capstyle="round", solid_joinstyle="round", label=label, zorder=3)
+
+
+def _primary_note(t: pd.DataFrame) -> str:
+    r = t.loc[PRIMARY_H]
+    if not np.isfinite(r["effect"]):
+        return ""
+    note = f"h = {PRIMARY_H}: {r['effect']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}], p = {r['p']:.4f}"
+    return note + (f", BH q = {r['q_bh']:.3f}" if np.isfinite(r["q_bh"]) else "")
 
 
 # ---------------------------------------------------------------------------------------------------------
 # Figure 1 · the fade curve
 # ---------------------------------------------------------------------------------------------------------
-def fade_curve(prof: pd.DataFrame, path: Path | None = None, subtitle: str = "") -> plt.Figure:
+def fade_curve(h1: pd.DataFrame, path: Path | None = None, subtitle: str = "") -> plt.Figure:
+    """h1: from_profile(profile, "H1")."""
     x = np.arange(len(HORIZONS))
-    fig, ax = plt.subplots(figsize=(9.5, 5.4))
-    ends = {}
-    for old, color in ((True, OLD), (False, SURPRISE)):
-        t = prof[prof["old"] == old].set_index("horizon").reindex(HORIZONS)
-        n = int(t["n"].max()) if t["n"].notna().any() else 0
-        _line(ax, x, t["mean"].to_numpy(float), t["ci_lo"].to_numpy(float), t["ci_hi"].to_numpy(float),
-              color, f"{GROUP_LABEL[old]} (n = {n})")
-        last = t["mean"].dropna()
-        if len(last):
-            ends[old] = (HORIZONS.index(last.index[-1]), float(last.iloc[-1]))
-    _horizon_axis(ax, x)
-    style(ax, xlabel="sessions after entry (exp = option expiry)",
-          ylabel="log(realised / implied vol), event minus ordinary days")
-    ax.legend(frameon=False, labelcolor=INK2, fontsize=9, loc="lower left")
-    lo, hi = ax.get_ylim()
-    if len(ends) == 2 and abs(ends[True][1] - ends[False][1]) > 0.06 * (hi - lo):   # direct labels only if they clear
-        for old, (i, v) in ends.items():
-            ax.annotate(GROUP_LABEL[old], (i, v), xytext=(8, 0), textcoords="offset points", va="center",
-                        fontsize=9, color=INK2)
-        ax.set_xlim(-0.4, len(HORIZONS) - 0.1 + 0.9)
-    ax.annotate("below zero: realised volatility fell short of implied\nby more than on the same stock's ordinary days",
-                (0.99, 0.02), xycoords="axes fraction", ha="right", va="bottom", fontsize=8, color=MUTED)
+    fig, (a, b) = plt.subplots(1, 2, figsize=(12.5, 5.2), gridspec_kw={"width_ratios": [1, 1]})
+    # left: where each group sits
+    _line(a, x, h1["mean_old"].to_numpy(float), OLD, "Old news")
+    _line(a, x, h1["mean_comp"].to_numpy(float), SURPRISE, "Surprise news")
+    _horizon_axis(a, x, h1)
+    style(a, "Mean outcome by group", "sessions after entry (exp = option expiry); events: old | surprise",
+          "log(realised / implied vol), event minus ordinary days")
+    a.legend(frameon=False, labelcolor=INK2, fontsize=9, loc="lower right")
+    # right: the tested difference with its interval
+    _line(b, x, h1["effect"].to_numpy(float), INK2, "", h1["ci_lo"].to_numpy(float), h1["ci_hi"].to_numpy(float))
+    _horizon_axis(b, x, h1)
+    style(b, "Old minus surprise, 95% interval", "sessions after entry (exp = option expiry); events: old | surprise",
+          "difference in log(realised / implied vol)")
+    _under_title(b, _primary_note(h1))
     top = _headline(fig, "The fade curve: does old news over-price the move?",
-                    subtitle or "Late executive and director 8-Ks, 1-month options.\n"
-                                f"Bands: 95% bootstrap intervals ({N_BOOT:,} resamples).")
+                    subtitle or "Late executive and director 8-Ks, 1-month options. Prediction: old news below surprise news.")
     fig.tight_layout(rect=(0, 0, 1, top))
     if path:
         fig.savefig(path, dpi=160, facecolor=SURFACE)
@@ -263,7 +214,8 @@ def _pct(v) -> str:
     return "n/a" if pd.isna(v) else f"{v:.0%}"
 
 
-def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horizon: int = int(PRIMARY_H)) -> plt.Figure:
+def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horizon: int = int(PRIMARY_H),
+                note: str = "") -> plt.Figure:
     """Price path through the gap and the filing, then the option-implied +/-1 sigma cone against what happened."""
     spot = spot.dropna()
     t0, t_pre, g0 = pd.Timestamp(row["t_0"]), pd.Timestamp(row["t_pre"]), pd.Timestamp(row["gap_start"])
@@ -272,13 +224,13 @@ def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horiz
 
     ax.axvspan(g0, t_pre, color=GRID, alpha=0.6, linewidth=0, zorder=0)
     n_gap = int(row["n_gap"])
-    ax.annotate(f"gap: {n_gap} session{'s' if n_gap != 1 else ''}, from the last close before the event to the last close "
-                "before the filing", (g0, 0.02), xycoords=("data", "axes fraction"), xytext=(4, 0),
+    ax.annotate(f"gap: {n_gap} session{'s' if n_gap != 1 else ''}, from the last close before the event to the last "
+                "close before the filing", (g0, 0.02), xycoords=("data", "axes fraction"), xytext=(4, 0),
                 textcoords="offset points", fontsize=8, color=INK2, va="bottom", bbox=LABEL_BOX, zorder=5)
 
     # the option-implied 1-sigma cone from entry, sized by the 1-month ATM implied vol at entry
     y_lo, y_hi = float(spot.min()), float(spot.max())
-    if t0 in spot.index and np.isfinite(row.get("iv0", np.nan)):
+    if t0 in spot.index and np.isfinite(pd.to_numeric(row.get("iv0"), errors="coerce")):
         after = spot.loc[t0:]
         k = np.arange(len(after))
         s0, iv0 = float(spot.loc[t0]), float(row["iv0"])
@@ -291,10 +243,9 @@ def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horiz
         y_lo, y_hi = min(y_lo, float(dn.min())), max(y_hi, float(up.max()))
 
     ax.plot(spot.index, spot.to_numpy(float), color=INK, linewidth=2, solid_capstyle="round", zorder=3)
-    exit_i = spot.index.searchsorted(t0) + horizon
-    marks = [(t0, "entry")] + ([(spot.index[exit_i], f"exit, {horizon} sessions")] if exit_i < len(spot) else [])
-    for d, txt in marks:
-        if d in spot.index:
+    exit_d = pd.Timestamp(row["exit_date"]) if pd.notna(row.get("exit_date")) else None
+    for d, txt in [(t0, "entry"), (exit_d, f"exit, {horizon} sessions")]:
+        if d is not None and d in spot.index:
             ax.plot([d], [spot.loc[d]], marker="o", markersize=8, color=INK, markeredgecolor=SURFACE,
                     markeredgewidth=1.5, zorder=4)
             if txt != "entry":
@@ -303,7 +254,7 @@ def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horiz
 
     # the three dates, labels staggered so close dates never collide
     accepted = pd.Timestamp(row["accepted_at"]) if pd.notna(row.get("accepted_at")) else None
-    events = [(pd.Timestamp(row["event_date"]), f"event (cover page) {pd.Timestamp(row['event_date']):%d %b}")]
+    events = [(pd.Timestamp(row["event_date"]), f"event (cover page) {pd.Timestamp(row['event_date']):%d %b %Y}")]
     if accepted is not None:
         events.append((accepted, f"filing accepted {accepted:%d %b %H:%M} ET"))
     events.append((t0, f"entry t₀: close of {t0:%d %b}"))
@@ -317,15 +268,15 @@ def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horiz
     span = (y_hi - y_lo) or 1.0
     ax.set_ylim(y_lo - 0.12 * span, y_hi + 0.30 * span)       # room below for the gap label, above for the dates
 
-    S, T = row.get("S", np.nan), row.get("T", np.nan)
-    why = (f"gap move {row.get('gap_move', np.nan):.1f}σ · implied vol {100 * row.get('d_iv_gap', np.nan):+.1f} pts in the gap · "
-           f"option volume ×{row.get('vol_gap_ratio', np.nan):.1f} · "
-           f"word cues {int(T) if pd.notna(T) else 'n/a'} of 3"
-           + (f" → old news (S = {S:.2f})" if pd.notna(S) else " → old news"))
+    S, T = pd.to_numeric(row.get("S"), errors="coerce"), pd.to_numeric(row.get("T"), errors="coerce")
+    gm, dv, vr = (pd.to_numeric(row.get(k), errors="coerce") for k in ("gap_move", "d_iv_gap", "vol_gap_ratio"))
+    why = (f"gap move {gm:.1f}σ · implied vol {100 * dv:+.1f} pts in the gap · option volume ×{vr:.1f} · "
+           f"word cues {int(T) if pd.notna(T) else 'n/a'} of 3" + (f" → old news (S = {S:.2f})" if pd.notna(S) else " → old news"))
     what = (f"next {horizon} sessions: realised {_pct(row.get('rv'))} vs implied {_pct(row.get('iv0'))} → "
-            f"Y = log(RV/IV₀) = {row.get('y', np.nan):+.2f}")
+            f"Y = log(RV/IV₀) = {pd.to_numeric(row.get('y'), errors='coerce'):+.2f}")
     role = str(row.get("role", "") or "people-news")
-    top = _headline(fig, f"One filing, end to end: {row['ticker']}, {role} 8-K", f"{why}\n{what}")
+    top = _headline(fig, f"One filing, end to end: {row['ticker']}, {role} 8-K",
+                    f"{why}\n{what}" + (f"\n{note}" if note else ""))
     fig.tight_layout(rect=(0, 0, 1, top))
     if path:
         fig.savefig(path, dpi=160, facecolor=SURFACE)
@@ -335,27 +286,21 @@ def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horiz
 # ---------------------------------------------------------------------------------------------------------
 # Figure 3 · the placebo beside the main result
 # ---------------------------------------------------------------------------------------------------------
-def placebo(diff_people: pd.DataFrame, diff_placebo: pd.DataFrame, path: Path | None = None,
-            subtitle: str = "") -> plt.Figure:
+def placebo(h1: pd.DataFrame, p: pd.DataFrame, path: Path | None = None, subtitle: str = "") -> plt.Figure:
+    """h1, p: from_profile(profile, "H1") and from_profile(profile, "P")."""
     x = np.arange(len(HORIZONS))
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharey=True)
-    panels = ((axes[0], diff_people, "People-news 8-Ks (test H1)", "one-sided"),
-              (axes[1], diff_placebo, "Placebo: late scheduled 8-Ks (test P)", "two-sided"))
-    for ax, d, title, sided in panels:
-        t = d.set_index("horizon").reindex(HORIZONS)
-        _line(ax, x, t["diff"].to_numpy(float), t["ci_lo"].to_numpy(float), t["ci_hi"].to_numpy(float), INK2, "")
-        _horizon_axis(ax, x)
-        n_old, n_sur = t.loc[PRIMARY_H, ["n_old", "n_surprise"]].fillna(0).astype(int)
-        p = t.loc[PRIMARY_H, "p"] if "p" in t else np.nan
-        style(ax, f"{title}", "sessions after entry (exp = option expiry)",
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.0), sharey=True)
+    for ax, t, title, sided in ((axes[0], h1, "People-news 8-Ks (test H1)", "one-sided"),
+                                (axes[1], p, "Placebo: late scheduled 8-Ks (test P)", "two-sided")):
+        _line(ax, x, t["effect"].to_numpy(float), INK2, "", t["ci_lo"].to_numpy(float), t["ci_hi"].to_numpy(float))
+        _horizon_axis(ax, x, t)
+        style(ax, title, "sessions after entry (exp = option expiry); events: old | surprise",
               "old minus surprise, log(RV / IV₀)" if ax is axes[0] else "")
-        note = f"at h = {PRIMARY_H}: {n_old} old, {n_sur} surprise"
-        if pd.notna(p):
-            note += f" · {sided} permutation p = {p:.3f}"
-        ax.annotate(note, (0.01, 0.02), xycoords="axes fraction", fontsize=8, color=INK2)
+        r = t.loc[PRIMARY_H]
+        _under_title(ax, f"h = {PRIMARY_H}: {r['effect']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}], "
+                         f"{sided} p = {r['p']:.4f}")
     top = _headline(fig, "The placebo: the same split on filings that carry no people news",
-                    subtitle or "Prediction: negative on the left, about zero on the right.\n"
-                                f"Bands: 95% bootstrap intervals ({N_BOOT:,} resamples).")
+                    subtitle or "Prediction: negative on the left, about zero on the right.")
     fig.tight_layout(rect=(0, 0, 1, top))
     if path:
         fig.savefig(path, dpi=160, facecolor=SURFACE)
@@ -365,32 +310,31 @@ def placebo(diff_people: pd.DataFrame, diff_placebo: pd.DataFrame, path: Path | 
 # ---------------------------------------------------------------------------------------------------------
 # All three
 # ---------------------------------------------------------------------------------------------------------
-def make_all(data: Inputs, folder: Path, title_suffix: str = "", walk: tuple[pd.Series, pd.Series] | None = None,
-             show: bool = False) -> dict[str, Path]:
-    """Write the three figures (and the tables behind them, as CSV) to `folder`; return name -> path."""
+def make_all(data: Inputs, folder: Path, label: str, title_suffix: str = "",
+             walk: tuple[pd.Series, pd.Series] | None = None, walk_note: str = "", show: bool = False) -> dict[str, Path]:
+    """Write the three figures for `label` to `folder`; return name -> path. The profile is the only source of the
+    first two. Refuses the retired labels (discovery, dryrun): nothing is drawn from 2022-2023."""
+    from oldnews import pipeline
+
+    pipeline.check_label(label)
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
-    out: dict[str, Path] = {}
-    m_people, m_placebo = matched(data, "people"), matched(data, "placebo")
-    prof = profile(m_people)
-    if data.profile is not None and len(data.profile):
-        check_against(prof, data.profile)
-        d_people, d_placebo = from_profile(data.profile, "H1"), from_profile(data.profile, "P")
-    else:
-        d_people, d_placebo = difference(m_people), difference(m_placebo)
-    prof.to_csv(folder / "fade_curve.csv", index=False)
-    pd.concat([d_people.assign(group="people"), d_placebo.assign(group="placebo")]).to_csv(
-        folder / "placebo.csv", index=False)
-    bands = f"Bands: 95% bootstrap intervals ({N_BOOT:,} resamples) · {title_suffix}"
-    figs = {"fade_curve": fade_curve(prof, folder / "fade_curve.png",
-                                     "Late executive and director 8-Ks, earnings excluded, 1-month options. "
-                                     f"Prediction: old news below surprise news.\n{bands}"),
-            "placebo": placebo(d_people, d_placebo, folder / "placebo.png",
-                               f"Prediction: negative on the left, about zero on the right.\n{bands}")}
+    h1, pl = from_profile(data.profile, "H1"), from_profile(data.profile, "P")
+    tail = f" · {title_suffix}" if title_suffix else ""
+    path = {n: folder / f"{n}.png" for n in ("fade_curve", "placebo", "walkthrough")}
+    figs = {"fade_curve": fade_curve(h1, path["fade_curve"],
+                                     "Late executive and director 8-Ks, earnings excluded, 1-month options. Prediction: old "
+                                     "news below surprise news.\nBelow zero: realised volatility fell short of implied by more "
+                                     "than on the same stock's ordinary days.\n"
+                                     f"From results/profile.csv (tests.py); bands: bootstrap 95%{tail}"),
+            "placebo": placebo(h1, pl, path["placebo"],
+                               "Prediction: negative on the left, about zero on the right.\nFrom results/profile.csv "
+                               f"(tests.py); bands: bootstrap 95%{tail}")}
     if walk is not None and len(walk[1].dropna()):
-        figs["walkthrough"] = walkthrough(walk[0], walk[1], folder / "walkthrough.png")
+        figs["walkthrough"] = walkthrough(walk[0], walk[1], path["walkthrough"], note=walk_note)
+    out = {}
     for name, fig in figs.items():
-        out[name] = folder / f"{name}.png"
+        out[name] = path[name]
         if not show:
             plt.close(fig)
     if show:

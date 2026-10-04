@@ -1,6 +1,6 @@
 """Gap inputs and outcomes for the old-news test (docs/test_plan.md), from the cached option data only.
 
-    gap, outcome = measure(rows, "discovery")
+    gap, outcome = measure(rows, "insample")
 
 `rows` is the events table and the nulls table stacked (columns row_id, kind, ticker, t_pre, t_0, gap_start,
 n_gap). Every row is priced offline with the notebook's own `price_event`; nothing calls the API. The function
@@ -22,18 +22,24 @@ Conventions
   volume baseline = mean over the cached sessions among the 5 before gap_start (at least 2); d_iv_gap needs a
   1m mark at both ends. usable = gap_move exists. Option bars start BARS_FROM_DAYS calendar days before t_pre
   (price_event), so a day earlier than that has no data and is never read as zero volume.
-- Dates (hard_stop_for): every t_pre, t_0 and gap_start must be before the window's hard stop, and no session on
-  or after it is ever read (exits and panel dates stop the session before). discovery and dryrun: 2024-01-01;
-  insample: 2026-01-01; holdout only when the notebook's RUN_HOLDOUT is True and oos only when RUN_OOS is True
-  (then up to LAST_SESSION). Any other label needs an explicit hard stop on or before 2026-01-01.
-- Judges' path (dryrun, holdout, oos): the r_mkt panel is the run's own rows plus at most 400 extra ticker-dates
-  from the window's other filings, a seeded sample (seed 20261003), so the run's cost stays bounded.
+- Window guard (bounds_for; .claude/ctx/06_window_guard.md). Only these labels run (a "_suffix" is allowed):
+  "insample": every date used lies in [2024-01-01, 2026-01-01) and the notebook's HOLDOUT_START..HOLDOUT_END (else
+  the placeholder 2023-06-01..2023-08-31) must not overlap that window. The row dates t_pre and t_0 must lie in it
+  (hard fail); a gap_start before 2024-01-01 makes that row unusable (its bars are never read); panel rows outside
+  it are dropped; option bars are clipped to it, from below as well as above (no 2023 bar is ever returned to
+  the notebook's pricing code, and the URLs stay those of the 2024-25 download, so the cache still hits).
+  "holdout": only when the notebook's RUN_HOLDOUT is True (the judges' window, any dates up to LAST_SESSION).
+  "oos": only when RUN_OOS is True (prints OOS_WARNING; cache only). "discovery" and "dryrun" are retired and
+  refused, and so is any other label. Nothing on or after 2026-01-01 is read under the insample label.
+- Judges' path (holdout, oos): the r_mkt panel is the run's own rows plus at most 400 extra ticker-dates from the
+  window's other filings, a seeded sample (seed 20261003), so the run's cost stays bounded.
 """
 from __future__ import annotations
 
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -47,9 +53,13 @@ from playground.measure import CacheMiss, go_offline, iv_proxy   # noqa: E402
 
 OUT_DIR = ROOT / "data" / "oldnews"
 NEVER = pd.Timestamp("2026-01-01")                     # out-of-sample starts here: never computed on
-STOPS = {"discovery": "2024-01-01", "dryrun": "2024-01-01", "insample": "2026-01-01"}   # fixed hard stops
+INSAMPLE = (pd.Timestamp("2024-01-01"), pd.Timestamp("2026-01-01"))     # [start, stop): the only window we run
+HOLDOUT_PLACEHOLDER = (pd.Timestamp("2023-06-01"), pd.Timestamp("2023-08-31"))   # the notebook's sealed window
+RETIRED = ("discovery", "dryrun")      # 2022-23 is outside the allowed 2024-2025 window: refused, never read
+RETIRED_MSG = ("2022-2023 is outside the allowed 2024-2025 window and overlaps the sealed placeholder "
+               "(2023-06-01..2023-08-31)")
 SWITCHED = {"holdout": "RUN_HOLDOUT", "oos": "RUN_OOS"}   # windows that run only when the notebook switch is on
-PANEL_CAP = {"dryrun": 400, "holdout": 400, "oos": 400}   # judges' path: at most this many extra panel keys
+PANEL_CAP = {"holdout": 400, "oos": 400}   # judges' path: at most this many extra panel keys
 SEED = 20261003
 BARS_FROM_DAYS = 10            # price_event fetches option bars from t_pre - 10 calendar days
 BASELINE_SESSIONS = 5          # volume baseline: the 5 sessions before gap_start (test plan)
@@ -143,7 +153,7 @@ def spot_on(priced: dict, day: pd.Timestamp, mode: str = "fresh") -> tuple[str |
 
 
 def gap_inputs(priced: dict, gap_start: pd.Timestamp, t_pre: pd.Timestamp, n_gap: int, cal: pd.DatetimeIndex,
-               min_baseline: int = MIN_BASELINE, mode: str = "fresh") -> dict:
+               min_baseline: int = MIN_BASELINE, mode: str = "fresh", floor: pd.Timestamp | None = None) -> dict:
     """Pre-entry gap inputs under the test plan's coverage rules (r_mkt and gap_move come later, from the panel).
     `priced` maps bucket -> PricedEvent in preference order. Returns the inputs, the diagnostics spot_bucket
     ("<gap-start bucket>|<t_pre bucket>"), n_eff, stale_sessions, n_baseline, the effective gap start gs_eff
@@ -153,6 +163,8 @@ def gap_inputs(priced: dict, gap_start: pd.Timestamp, t_pre: pd.Timestamp, n_gap
            "gs_eff": pd.NaT, "reasons": []}
     why = out["reasons"]
     fetch_start = t_pre - pd.Timedelta(days=BARS_FROM_DAYS)
+    if floor is not None:                         # nothing before the window start is ever read
+        fetch_start = max(fetch_start, floor)
     i_gs, i_tp = cal.get_loc(gap_start), cal.get_loc(t_pre)
     gap_ok = n_gap >= 1 and i_tp - i_gs == n_gap
     if not gap_ok:
@@ -181,8 +193,9 @@ def gap_inputs(priced: dict, gap_start: pd.Timestamp, t_pre: pd.Timestamp, n_gap
 
     # implied-volatility change: a 1m mark at both ends
     pe1 = priced.get("1m")
-    if pe1 is not None:
+    if pe1 is not None and gap_start >= fetch_start:
         out["iv_gap_start"] = parity_spot(pe1, gap_start, mode)[1]
+    if pe1 is not None:
         out["iv_tpre"] = parity_spot(pe1, t_pre, mode)[1]
         out["d_iv_gap"] = out["iv_tpre"] - out["iv_gap_start"]
     if not np.isfinite(out["d_iv_gap"]):
@@ -272,27 +285,58 @@ def market_returns(series: list[tuple[str, pd.Series]], queries: list[tuple[str,
 # ---- driver -----------------------------------------------------------------------------------------------
 
 def window_of(label: str) -> str | None:
-    """The window a label belongs to ("discovery_nbmarks" -> "discovery"), or None."""
+    """The window a label belongs to ("insample_x" -> "insample"), or None if it is not a window we run."""
     base = label.split("_")[0]
-    return base if base in STOPS or base in SWITCHED else None
+    return base if base == "insample" or base in SWITCHED or base in RETIRED else None
 
 
-def hard_stop_for(label: str, NB: dict, hard_stop: str | None = None) -> pd.Timestamp:
-    """The first date a run under `label` may never read. An explicit hard_stop can only tighten it."""
+def bounds_for(label: str, NB: dict, hard_stop: str | None = None) -> tuple[pd.Timestamp | None, pd.Timestamp]:
+    """(floor, stop) for a run under `label`: no date before `floor` (None: no floor) and none on or after `stop`
+    is ever read. An explicit hard_stop can only tighten the stop. Raises ValueError for a retired or unknown
+    label, a switched window whose notebook switch is off, and an insample window that overlaps the sealed one."""
     w = window_of(label)
+    if w in RETIRED:
+        raise ValueError(f"label {label!r} is retired: {RETIRED_MSG}")
+    if w is None:
+        raise ValueError(f"unknown label {label!r}: use 'insample' (or 'insample_<name>'), 'holdout' or 'oos'")
     if w in SWITCHED:
         if NB.get(SWITCHED[w]) is not True:
             raise ValueError(f"label {label!r} runs only when the notebook's {SWITCHED[w]} is True; refused")
         if w == "oos":
             print(NB.get("OOS_WARNING", "WARNING: THE OUT-OF-SAMPLE SECTION IS ON."), file=sys.stderr, flush=True)
-        stop = pd.Timestamp(NB["LAST_SESSION"]) + pd.Timedelta(days=1)
-    elif w is not None:
-        stop = pd.Timestamp(STOPS[w])
+        floor, stop = None, pd.Timestamp(NB["LAST_SESSION"]) + pd.Timedelta(days=1)
     else:
-        if hard_stop is None or pd.Timestamp(hard_stop) > NEVER:
-            raise ValueError(f"label {label!r} is not a known window: pass a hard_stop on or before {NEVER.date()}")
-        stop = pd.Timestamp(hard_stop)
-    return min(stop, pd.Timestamp(hard_stop)) if hard_stop is not None else stop
+        floor, stop = INSAMPLE
+        hs = pd.Timestamp(NB.get("HOLDOUT_START", HOLDOUT_PLACEHOLDER[0]))
+        he = pd.Timestamp(NB.get("HOLDOUT_END", HOLDOUT_PLACEHOLDER[1]))
+        if hs < stop and he >= floor:
+            raise ValueError(f"label {label!r}: the sealed window {hs.date()}..{he.date()} overlaps the in-sample "
+                             f"window {floor.date()}..{(stop - pd.Timedelta(days=1)).date()}; refused")
+    if hard_stop is not None:
+        stop = min(stop, pd.Timestamp(hard_stop))
+    return floor, stop
+
+
+@contextmanager
+def window_bars(NB: dict, floor: pd.Timestamp | None, stop: pd.Timestamp):
+    """Clip the notebook's option_bars to [floor, stop) for the length of the block, then put it back. Requests
+    still go out with an end date of at most 2025-12-31 (the URLs of the 2024-25 download, so the offline cache
+    hits); the rows returned are cut at both ends, so no bar outside the window reaches any pricing code."""
+    orig = NB.get("option_bars")
+    if orig is None or floor is None:
+        yield
+        return
+    url_end = NEVER - pd.Timedelta(days=1)
+
+    def option_bars(tk, start, end):
+        bars = orig(tk, start, min(pd.Timestamp(end), url_end))
+        return bars.loc[(bars.index >= floor) & (bars.index < stop)]
+
+    NB["option_bars"] = option_bars
+    try:
+        yield
+    finally:
+        NB["option_bars"] = orig
 
 
 def sample_panel(keys, cap: int | None, seed: int = SEED) -> list[tuple]:
@@ -329,20 +373,25 @@ def load_offline_nb() -> dict:
     return NB
 
 
-def _dates(df: pd.DataFrame, cols: list[str], stop: pd.Timestamp, cal: pd.DatetimeIndex, strict: bool
-           ) -> pd.DataFrame:
-    """Parse date columns; hard-fail (strict) or drop (not strict) any date on or after the hard stop; add
-    <col>_ok = the date is a trading session."""
+def _dates(df: pd.DataFrame, cols: list[str], stop: pd.Timestamp, cal: pd.DatetimeIndex, strict: bool,
+           floor: pd.Timestamp | None = None, soft: tuple[str, ...] = ()) -> pd.DataFrame:
+    """Parse date columns. A date on or after `stop`, or before `floor`, is a hard fail (strict) or the row is
+    dropped (not strict); columns in `soft` may precede `floor` (they are only marked not ok, and never read).
+    Adds <col>_ok = the date is a trading session inside the window."""
     df = df.copy()
     for c in cols:
         df[c] = pd.to_datetime(df[c], errors="coerce")
-        bad = df[c] >= stop
-        if bad.any():
-            if strict:
-                raise ValueError(f"{int(bad.sum())} rows have {c} on or after {stop.date()}; refused")
-            df = df[~bad]
+        conds = [("on or after", stop, lambda x: x >= stop)]
+        if floor is not None and c not in soft:
+            conds.append(("before", floor, lambda x: x < floor))
+        for rel, day, test in conds:
+            bad = test(df[c])
+            if bad.any():
+                if strict:
+                    raise ValueError(f"{int(bad.sum())} rows have {c} {rel} {day.date()}; refused")
+                df = df[~bad]
     for c in cols:
-        df[c + "_ok"] = df[c].isin(cal)
+        df[c + "_ok"] = df[c].isin(cal) & (df[c] >= floor if floor is not None else True)
     return df
 
 
@@ -393,8 +442,9 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
     panel_rows: extra (ticker, t_pre, t_0) rows priced only to widen the r_mkt spot panel (e.g. every cached
     discovery event and ordinary day), so r_mkt approaches the test plan's "all cached TOP_100 tickers".
     max_panel: at most this many panel-only (ticker, t_pre) keys, a seeded sample; "auto" = 400 on the judges'
-    path (dryrun, holdout, oos), unbounded otherwise; None = unbounded.
-    hard_stop: required for a label outside the known windows; otherwise it can only tighten the window's stop.
+    path (holdout, oos), unbounded otherwise; None = unbounded. Panel rows outside the window (insample:
+    2024-01-01..2025-12-31) are dropped and counted in the log.
+    hard_stop: can only tighten the window's stop (see bounds_for for the guard).
     entry_shift: enter this many sessions after t_0 (test plan sensitivity: t_0 + 1).
     min_baseline: cached sessions (of the 5 before gap_start) the volume baseline needs (coverage rules: 2).
     outcomes: False computes, writes and returns only the gap table (outcome is None, no outcome file is touched);
@@ -408,24 +458,27 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
     NB = NB if NB is not None else load_offline_nb()
     if "SESSION" in NB:
         go_offline(NB)
-    stop = hard_stop_for(label, NB, hard_stop)
+    floor, stop = bounds_for(label, NB, hard_stop)
     cal, horizons = NB["CAL"], list(NB["HORIZONS"])
     otm_grid, buckets = list(NB["OTM_GRID"]), NB["EXPIRY_BUCKETS"]
     max_stale, haircut = int(NB["MAX_STALE_SESSIONS"]), float(NB["COST_HAIRCUT"])
     last_day = min(cal[cal.searchsorted(stop) - 1], NB["LAST_SESSION"])
 
-    rows = _dates(rows, ["t_pre", "t_0", "gap_start"], stop, cal, strict=True).reset_index(drop=True)
+    rows = _dates(rows, ["t_pre", "t_0", "gap_start"], stop, cal, strict=True, floor=floor,
+                  soft=("gap_start",)).reset_index(drop=True)
     if rows["row_id"].duplicated().any():
         raise ValueError(f"row_id is not unique ({int(rows.row_id.duplicated().sum())} duplicates)")
     rows["n_gap"] = pd.to_numeric(rows["n_gap"], errors="coerce")
     fmt = lambda t: "" if pd.isna(t) else f"{t:%Y-%m-%d}"   # noqa: E731
     rows["fp"] = [f"{r.ticker}|{fmt(r.t_pre)}|{fmt(r.t_0)}|{fmt(r.gap_start)}|{r.n_gap}" for r in rows.itertuples()]
     extra = pd.DataFrame({"ticker": [], "t_pre": pd.to_datetime([]), "t_0": pd.to_datetime([]), "t_pre_ok": []})
+    n_panel_in = 0
     if panel_rows is not None and len(panel_rows):
-        extra = _dates(panel_rows[["ticker", "t_pre", "t_0"]], ["t_pre", "t_0"], stop, cal, strict=False)
+        extra = _dates(panel_rows[["ticker", "t_pre", "t_0"]], ["t_pre", "t_0"], stop, cal, strict=False, floor=floor)
+        n_panel_in = len(panel_rows)
     settings = {"hard_stop": f"{stop:%Y-%m-%d}", "entry_shift": entry_shift, "min_baseline": min_baseline,
                 "mode": mode, "bars_from_days": BARS_FROM_DAYS, "horizons": horizons, "otm_grid": otm_grid,
-                "gap_rules": GAP_RULES, "outcomes": outcomes}
+                "gap_rules": GAP_RULES, "outcomes": outcomes, "floor": None if floor is None else f"{floor:%Y-%m-%d}"}
     store = _Parts(out_dir, label if outcomes else f"{label}_gaponly", settings)
     log_path = log_path or (Path(out_dir) / "measure_progress.log" if out_dir is not None else None)
 
@@ -458,6 +511,10 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
              | dict(zip(zip(todo.ticker, todo.t_pre), todo.t_0)))
     row_keys = list(dict.fromkeys(zip(rows.ticker[rows.t_pre_ok], rows.t_pre[rows.t_pre_ok])))
     cap = PANEL_CAP.get(window_of(label)) if max_panel == "auto" else max_panel
+    if n_panel_in:
+        log(f"panel rows offered {n_panel_in:,}, kept {len(extra):,} inside the window "
+            f"({'-' if floor is None else f'{floor:%Y-%m-%d}'}..{stop - pd.Timedelta(days=1):%Y-%m-%d}), "
+            f"dropped {n_panel_in - len(extra):,}")
     panel_keys = sample_panel(set(zip(ok_extra.ticker, ok_extra.t_pre)) - set(row_keys), cap)
     all_keys = row_keys + panel_keys
     keys = [k for k in all_keys if k in by_key or k not in store.series]
@@ -474,7 +531,7 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
             by_bucket = {b: pe for b in buckets for pe in priced if pe.bucket == b}     # 1m, 2m, 3-6m order
             pe1 = by_bucket.get("1m")
             if pe1 is not None:                   # the 1m spot series for the r_mkt panel, before the hard stop
-                days = cal[(cal >= t_pre - pd.Timedelta(days=BARS_FROM_DAYS))
+                days = cal[(cal >= max(t_pre - pd.Timedelta(days=BARS_FROM_DAYS), floor if floor is not None else cal[0]))
                            & (cal <= min(pe1.expiry_session, last_day))]
                 out["series"] = (ticker, spot_path(pe1, days, mode))
             for i in by_key.get(key, []):
@@ -484,10 +541,12 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
                 if pe1 is None:
                     why = "; ".join(n for n in notes if bucket_of(n) in ("1m", "all")) or "no 1m expiry"
                     rec["gap"]["reasons"].append(f"1m bucket not priced ({why})")
-                if by_bucket and (not r.gap_start_ok or pd.isna(r.n_gap)):
+                if by_bucket and floor is not None and pd.notna(r.gap_start) and r.gap_start < floor:
+                    rec["gap"]["reasons"].append(f"gap reaches before {floor:%Y-%m-%d}")
+                elif by_bucket and (not r.gap_start_ok or pd.isna(r.n_gap)):
                     rec["gap"]["reasons"].append("gap_start or n_gap missing or not a trading session")
                 elif by_bucket:
-                    g = gap_inputs(by_bucket, r.gap_start, t_pre, int(r.n_gap), cal, min_baseline, mode)
+                    g = gap_inputs(by_bucket, r.gap_start, t_pre, int(r.n_gap), cal, min_baseline, mode, floor)
                     rec["gap"]["reasons"] += g.pop("reasons")
                     rec["gap"].update(g)
                 i0 = cal.get_loc(r.t_0) + entry_shift if r.t_0_ok else -1
@@ -508,7 +567,7 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
     t_start, n_todo, rows_done, errors = time.time(), len(todo) + len(bad), len(bad), 0
     log(f"{len(rows):,} rows ({len(rows) - n_todo:,} already done), {len(keys):,} keys to price "
         f"({len(all_keys):,} in all, panel included), mode={mode}, hard stop {stop.date()}")
-    with ThreadPoolExecutor(max(1, workers)) as ex:
+    with window_bars(NB, floor, stop), ThreadPoolExecutor(max(1, workers)) as ex:
         for b in range(0, len(keys), batch_size):
             res = list(ex.map(work, keys[b:b + batch_size]))
             store.save({"per_row": {k: v for r in res for k, v in r["per_row"].items()},
@@ -546,6 +605,7 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
         outcome = pd.DataFrame([o for rec in recs for o in rec["outcome"]], columns=OUTCOME_COLS)
         if len(outcome):
             assert (outcome.exit_date < stop).all() and (outcome.entry_date < stop).all(), "a date reached the stop"
+            assert floor is None or (outcome.entry_date >= floor).all(), "an entry date precedes the window"
     drops = pd.DataFrame([d for rec in recs for d in rec["drops"]], columns=["row_id", "bucket", "reason"])
     if out_dir is not None:
         out_dir = Path(out_dir)
@@ -574,15 +634,16 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
 
 def main(argv: list[str] | None = None) -> int:
     """Run measure() on data/oldnews/events_<label>.csv + nulls_<label>.csv, offline, resumable.
-    Example:  .venv/Scripts/python.exe src/oldnews/measure.py discovery --panel"""
+    Example:  .venv/Scripts/python.exe src/oldnews/measure.py insample --panel"""
     import argparse
     import os
     ap = argparse.ArgumentParser(description=main.__doc__)
-    ap.add_argument("label", choices=sorted(STOPS))   # holdout and oos run only from the notebook, with its switch on
+    ap.add_argument("label", choices=["insample"])   # holdout and oos run only from the notebook, with its switch on
     ap.add_argument("--mode", default="fresh", choices=["fresh", "notebook"])
     ap.add_argument("--suffix", default="", help="output name suffix: gap_<label>_<suffix>.csv")
     ap.add_argument("--panel", action="store_true",
-                    help="also price every cached playground event and ordinary day of this label (r_mkt panel)")
+                    help="also price the playground download's 2024-25 filings and ordinary days (r_mkt panel; "
+                         "rows outside 2024-2025 are dropped)")
     ap.add_argument("--entry-shift", type=int, default=0)
     ap.add_argument("--min-baseline", type=int, default=MIN_BASELINE)
     ap.add_argument("--gap-only", action="store_true", help="compute and write only gap_<label>.csv")

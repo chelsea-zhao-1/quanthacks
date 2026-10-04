@@ -13,8 +13,9 @@ Every rule comes from docs/test_plan.md ("Trade" and test H2). None is tuned on 
   so the same trades are taken at 1x and 2x.
 - Risk: the equity curve is reported two ways. "Closed" books each trade at its exit. "MTM" also marks
   open trades at their liquidation value (the same put closed at an earlier fixed horizon, net of the exit
-  cost), carried forward between marks. Max drawdown, the five worst trades and each calendar year (so 2022
-  separately) are reported at both cost levels.
+  cost), carried forward between marks. Max drawdown and the five worst trades are reported at both cost
+  levels. The pooled window is the primary result; the same books are also reported by entry year and by
+  entry calendar quarter (the worst quarter is the stress test).
 - Benchmarks for H2: the same put on the matched ordinary days of the old-news events (one book per null
   round), and on all late people-news events (old and surprise together).
 - Capacity: contracts per trade = floor(10% of the put's entry-day volume), and the dollar collateral
@@ -24,11 +25,17 @@ Inputs (data/oldnews/): events_<label>.csv, nulls_<label>.csv, outcome_<label>.c
 (optional), and classify's labelled table classified_<label>.csv (`row_id`, `scored`, `old` = primary rule).
 Outputs: data/oldnews/trade_<label>/ (CSV tables and summary.md). Every book and H2 row is appended to the
 test ledger, data/oldnews/ledger.csv.
+
+Window guard (.claude/ctx/06_window_guard.md): the options history on our key covers 2024-2025 only.
+"insample" runs only on dates in [2024-01-01, 2026-01-01) that do not touch the sealed window
+HOLDOUT_START..HOLDOUT_END; "holdout" only when the notebook's RUN_HOLDOUT is True; "oos" only when RUN_OOS is
+True. "discovery" and "dryrun" are retired and refuse; so does any other label.
 """
 from __future__ import annotations
 
 import heapq
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -49,10 +56,14 @@ CAPACITY_SHARE = 0.10
 N_BOOT = 10_000
 LOW_SAMPLE = 30
 COSTS = {"1x": "csp_net", "2x": "csp_net2x"}
-DISCOVERY_END = pd.Timestamp("2024-01-01")
-HARD_STOP = pd.Timestamp("2026-01-01")
-ENTRY_CAPS = {"discovery": DISCOVERY_END, "dryrun": DISCOVERY_END, "insample": HARD_STOP}   # as pipeline.WINDOWS
-GATED_UPSTREAM = ("holdout", "oos")   # pipeline.window_rules runs these only after RUN_HOLDOUT / RUN_OOS is set
+WINDOW_START = pd.Timestamp("2024-01-01")      # first day of the in-sample window (options history starts here)
+HARD_STOP = pd.Timestamp("2026-01-01")         # nothing is ever computed on or after this day (rule 8)
+HOLDOUT_PLACEHOLDER = (pd.Timestamp("2023-06-01"), pd.Timestamp("2023-08-31"))   # the notebook's sealed placeholder
+RETIRED = ("discovery", "dryrun")
+RETIRED_MSG = ("2022-2023 is outside the allowed 2024-2025 window and overlaps the sealed placeholder "
+               "(2023-06-01..2023-08-31)")
+SWITCHES = {"holdout": "RUN_HOLDOUT", "oos": "RUN_OOS"}   # labels that run only when the notebook switch is on
+ENTRY_COLS = ("filing_date", "gap_start", "t_pre", "t_0", "entry_date")
 
 TRADE_COLS = ["row_id", "entry_date", "exit_date", "put_strike", "put_premium", "put_volume_entry",
               "csp_gross", "csp_net", "csp_net2x"]
@@ -87,18 +98,61 @@ def prep_outcome(outcome: pd.DataFrame) -> pd.DataFrame:
     return o
 
 
-def check_dates(outcome: pd.DataFrame, label: str) -> None:
-    """Hard stop before any computation, with the pipeline's date rules. Entries: before 2024-01-01 for
-    discovery, the dry run and any unknown label; before 2026-01-01 for insample. Usable exits: before
-    2026-01-01. Only "holdout" (judges' sealed window) and "oos" (the one-time human run) skip this; the
-    pipeline lets those labels run only after RUN_HOLDOUT or RUN_OOS has been switched on."""
-    if label in GATED_UPSTREAM:
+def _namespace(NB: dict | None) -> dict:
+    """The notebook namespace (RUN_HOLDOUT, RUN_OOS, HOLDOUT_START, ...): NB if given, else the running `__main__`."""
+    return NB if NB is not None else vars(sys.modules["__main__"])
+
+
+def check_label(label: str, NB: dict | None = None) -> None:
+    """Refuse a label before anything is read. discovery and dryrun are retired; holdout needs RUN_HOLDOUT
+    True and oos needs RUN_OOS True in the notebook namespace; insample is always allowed (its dates are
+    checked by `check_dates`); any other label is refused."""
+    if label in RETIRED:
+        raise PermissionError(RETIRED_MSG)
+    if label == "insample":
         return
-    cap = ENTRY_CAPS.get(label, DISCOVERY_END)
-    if (outcome["entry_date"] >= cap).any():
-        raise ValueError(f"label {label!r}: outcome has entries on or after {cap.date()}; refusing to run")
-    if (outcome["usable"] & (outcome["exit_date"] >= HARD_STOP)).any():
-        raise ValueError(f"label {label!r}: usable outcome rows exit on or after {HARD_STOP.date()}; refusing to run")
+    if label in SWITCHES:
+        if _namespace(NB).get(SWITCHES[label]) is not True:
+            who = "the judges set" if label == "holdout" else "a human sets"
+            raise PermissionError(f"label {label!r} runs only after {who} {SWITCHES[label]} = True (section 2)")
+        return
+    raise PermissionError(f"unknown label {label!r}; allowed: insample, holdout (RUN_HOLDOUT), oos (RUN_OOS)")
+
+
+def holdout_window(NB: dict | None = None) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """HOLDOUT_START..HOLDOUT_END from the notebook namespace, else the placeholder 2023-06-01..2023-08-31."""
+    ns = _namespace(NB)
+    start, end = ns.get("HOLDOUT_START"), ns.get("HOLDOUT_END")
+    if start is None or end is None:
+        return HOLDOUT_PLACEHOLDER
+    return pd.Timestamp(start), pd.Timestamp(end)
+
+
+def check_dates(frames: dict[str, pd.DataFrame | None], label: str, NB: dict | None = None) -> None:
+    """Hard stop before any computation. `frames` maps a name to events, nulls or outcome.
+
+    insample: every date used (filing_date, gap_start, t_pre, t_0, entry_date, and the exit_date of every
+    usable outcome row) must lie in [2024-01-01, 2026-01-01) and outside HOLDOUT_START..HOLDOUT_END.
+    holdout and oos: no date cap here (the label itself is gated by `check_label`). Retired labels refuse."""
+    check_label(label, NB)
+    if label != "insample":
+        return
+    h0, h1 = holdout_window(NB)
+    for name, df in frames.items():
+        if df is None:
+            continue
+        for col in (*ENTRY_COLS, "exit_date"):
+            if col not in df.columns:
+                continue
+            d = pd.to_datetime(df[col], errors="coerce")
+            if col == "exit_date" and "usable" in df.columns:
+                d = d.where(_flag(df["usable"]))                   # an unusable row's exit is never used
+            for bad, why in ((d < WINDOW_START, f"before {WINDOW_START.date()}"),
+                             (d >= HARD_STOP, f"on or after {HARD_STOP.date()}"),
+                             ((d >= h0) & (d <= h1), f"inside the sealed window {h0.date()}..{h1.date()}")):
+                if bad.any():
+                    raise PermissionError(f"{name}.{col} has {int(bad.sum())} dates {why}; refusing to run "
+                                          f"label {label!r} (allowed: {WINDOW_START.date()}..{HARD_STOP.date()}, exclusive)")
 
 
 def _read(path: Path) -> pd.DataFrame:
@@ -109,7 +163,9 @@ def _read(path: Path) -> pd.DataFrame:
 
 
 def load(label: str, data_dir: Path = DATA) -> dict[str, pd.DataFrame]:
-    """The input tables for one label (gap is optional)."""
+    """The input tables for one label (gap is optional). Retired labels refuse before any file is touched."""
+    if label in RETIRED:
+        raise PermissionError(RETIRED_MSG)
     out = {name: _read(data_dir / f"{name}_{label}.csv") for name in ("events", "nulls", "outcome")}
     gap = data_dir / f"gap_{label}.csv"
     out["gap"] = _read(gap) if gap.exists() else None
@@ -257,6 +313,15 @@ def worst(taken: pd.DataFrame, pnl: str, k: int = 5) -> pd.DataFrame:
     return w[cols].assign(pnl_pct=100 * w[pnl])
 
 
+def worst_quarter(by_quarter: pd.DataFrame, book: str = "old", horizon: str = HEADLINE_HORIZON) -> pd.DataFrame:
+    """Per cost level, the entry calendar quarter with the lowest book return (among quarters with a trade)."""
+    q = by_quarter[(by_quarter["book"] == book) & (by_quarter["horizon"] == horizon)]
+    if q.empty:
+        return q
+    w = q.loc[q.groupby("cost")["total_return_pct"].idxmin()]
+    return w[["cost", "quarter", "n_trades", "total_return_pct", "hit_rate_pct", "max_dd_mtm_pct"]]
+
+
 # ---------------------------------------------------------------- capacity
 
 def capacity(taken: pd.DataFrame) -> pd.DataFrame:
@@ -361,18 +426,22 @@ def _md(df: pd.DataFrame) -> str:
     return "\n".join(lines + ["| " + " | ".join(_fmt(v) for v in r) + " |" for r in df.itertuples(index=False)])
 
 
-def run(label: str, labels: pd.DataFrame | None = None, *, data_dir: Path = DATA, out_dir: Path | None = None,
-        bucket: str = BUCKET, otm: float = OTM, label_col: str = "old", log: bool = True) -> dict[str, pd.DataFrame]:
+def run(label: str, labels: pd.DataFrame | None = None, *, NB: dict | None = None, data_dir: Path = DATA,
+        out_dir: Path | None = None, bucket: str = BUCKET, otm: float = OTM, label_col: str = "old",
+        log: bool = True) -> dict[str, pd.DataFrame]:
     """Build the trading record for one label and write data/oldnews/trade_<label>/ (tables and summary.md).
+    The pooled window is the primary result; by entry year and by entry quarter come alongside. `NB` is the
+    notebook namespace (RUN_HOLDOUT, RUN_OOS, HOLDOUT_START/END); the label is checked before anything is read.
 
     `labels` is the labelled event table from classify (`row_id`, `label_col`, `scored`); by default it is read
     from classified_<label>.csv. `bucket`, `otm` (percent) and `label_col` (e.g. old_math_only_1) are for the
     test plan's sensitivity runs; the defaults are the committed headline, and any other choice writes to its
     own folder trade_<label>_<bucket>_otm<otm>_<label_col>/."""
+    check_label(label, NB)
     data_dir = Path(data_dir)
     inp = load(label, data_dir)
     outcome = prep_outcome(inp["outcome"])
-    check_dates(outcome, label)
+    check_dates({"events": inp["events"], "nulls": inp["nulls"], "outcome": outcome}, label, NB)
     if labels is None:
         labels = _read(data_dir / f"classified_{label}.csv")
     ev, ev_counts = eligible_events(inp["events"], labels, label_col, inp["gap"])
@@ -384,7 +453,7 @@ def run(label: str, labels: pd.DataFrame | None = None, *, data_dir: Path = DATA
     marks = marks[["row_id", "exit_date", *COSTS.values()]].rename(columns={"exit_date": "mark_date"})
 
     trades["taken"] = False
-    summary, years, worst_rows, curves = [], [], [], []
+    summary, years, quarters, worst_rows, curves = [], [], [], [], []
     for (book, hz), g in trades.groupby(["book", "horizon"], sort=False):
         trades.loc[g.index, "taken"] = simulate(g)
         tk = trades.loc[g.index][trades.loc[g.index, "taken"]]
@@ -398,8 +467,10 @@ def run(label: str, labels: pd.DataFrame | None = None, *, data_dir: Path = DATA
             worst_rows.append(worst(tk, pnl).assign(**key))
             for yr, ty in tk.groupby(tk["entry_date"].dt.year):
                 years.append({**key, "year": int(yr), **book_metrics(ty, equity(ty, mk, pnl), pnl)})
+            for q, tq in tk.groupby(tk["entry_date"].dt.to_period("Q")):
+                quarters.append({**key, "quarter": str(q), **book_metrics(tq, equity(tq, mk, pnl), pnl)})
 
-    summary, years = pd.DataFrame(summary), pd.DataFrame(years)
+    summary, years, quarters = pd.DataFrame(summary), pd.DataFrame(years), pd.DataFrame(quarters)
     worst_df, curves = pd.concat(worst_rows, ignore_index=True), pd.concat(curves, ignore_index=True)
     head = trades[(trades["book"] == "old") & (trades["horizon"] == HEADLINE_HORIZON) & trades["taken"]]
     cap = capacity(head)
@@ -408,13 +479,12 @@ def run(label: str, labels: pd.DataFrame | None = None, *, data_dir: Path = DATA
     headline = (bucket, float(otm), label_col) == (BUCKET, OTM, "old")
     out_dir = out_dir or data_dir / (f"trade_{label}" if headline else f"trade_{label}_{bucket}_otm{otm:g}_{label_col}")
     out_dir.mkdir(parents=True, exist_ok=True)
-    tables = {"counts": counts, "trades": trades, "summary": summary, "by_year": years, "worst": worst_df,
+    tables = {"counts": counts, "trades": trades, "summary": summary, "by_year": years, "by_quarter": quarters, "worst": worst_df,
               "equity": curves, "capacity": cap, "h2": h2_df}
     for name, df in tables.items():
         df.to_csv(out_dir / f"{name}.csv", index=False)
-    n_exit_2024 = int((head["exit_date"] >= DISCOVERY_END).sum()) if label == "discovery" else 0
-    (out_dir / "summary.md").write_text(_summary_md(label, tables, capacity_summary(cap), n_exit_2024, bucket, otm,
-                                                    label_col), encoding="utf-8")
+    (out_dir / "summary.md").write_text(_summary_md(label, tables, capacity_summary(cap), bucket, otm, label_col),
+                                        encoding="utf-8")
     if log:
         _log(label, summary, h2_df, bucket, otm, label_col, data_dir / "ledger.csv")
     return tables
@@ -445,22 +515,27 @@ def _log(label: str, summary: pd.DataFrame, h2_df: pd.DataFrame, bucket: str, ot
     ledger.append(path, pd.concat([books, tests], ignore_index=True), ledger.new_run_id(), {}, _git_head())
 
 
-def _summary_md(label: str, t: dict[str, pd.DataFrame], cap: dict, n_exit_2024: int, bucket: str, otm: float,
+def _summary_md(label: str, t: dict[str, pd.DataFrame], cap: dict, bucket: str, otm: float,
                 label_col: str) -> str:
     s, hz = t["summary"], HEADLINE_HORIZON
-    head = s[s["horizon"] == hz][["book", "cost", "n_eligible", "n_trades", "n_skipped_cap", "total_return_pct",
-                                  "annualised_pct", "hit_rate_pct", "mean_trade_pct", "max_dd_closed_pct",
-                                  "max_dd_mtm_pct"]]
+    cols = ["book", "cost", "n_eligible", "n_trades", "n_skipped_cap", "total_return_pct", "annualised_pct",
+            "hit_rate_pct", "mean_trade_pct", "max_dd_closed_pct", "max_dd_mtm_pct"]
+    head = s[s["horizon"] == hz][cols]
     yr = t["by_year"]
-    yr = yr[(yr["book"] == "old") & (yr["horizon"] == hz)][["year", "cost", "n_trades", "total_return_pct",
-                                                              "hit_rate_pct", "max_dd_closed_pct", "max_dd_mtm_pct"]]
+    yr = yr[yr["horizon"] == hz][["year", "book", "cost", "n_trades", "total_return_pct", "hit_rate_pct",
+                                  "mean_trade_pct", "max_dd_closed_pct", "max_dd_mtm_pct"]]
+    yr = yr.sort_values(["year", "book", "cost"], ignore_index=True)
     w = t["worst"]
     w = w[(w["book"] == "old") & (w["horizon"] == hz) & (w["cost"] == "1x")].drop(columns=["book", "horizon", "cost"])
+    wq = worst_quarter(t["by_quarter"])
     h = t["h2"][t["h2"]["horizon"] == hz].drop(columns="horizon")
     hor = s[(s["book"] == "old")][["horizon", "cost", "n_trades", "total_return_pct", "mean_trade_pct",
                                    "max_dd_mtm_pct"]]
     n_old = int(head.loc[(head["book"] == "old") & (head["cost"] == "1x"), "n_trades"].sum())
     ev = t["counts"][t["counts"]["book"] == "events"][["step", "kept"]]
+    first, last = t["trades"]["entry_date"].min(), t["trades"]["exit_date"].max()
+    period = ("pooled 2024-25 (primary)" if label == "insample"
+              else f"pooled {_fmt(first)}..{_fmt(last)} (primary)")
     lines = [
         f"# Trade record: {label}",
         "",
@@ -473,12 +548,13 @@ def _summary_md(label: str, t: dict[str, pd.DataFrame], cap: dict, n_exit_2024: 
         f"{' (fewer than 30)' if n_old < LOW_SAMPLE else ''}.**",
         "",
         "## Events", _md(ev), "",
-        f"## Books at h = {hz}", _md(head), "",
+        f"## Books at h = {hz}, {period}", _md(head), "",
         "Books: `old` = the strategy; `null_r<k>` = the same put on round-k matched ordinary days; `all_late` = "
         "all late people-news events. MTM drawdown marks open trades at the fixed horizons only.", "",
-        f"## Old-news book by year (2022 separately), h = {hz}", _md(yr), "",
-        f"## Five worst old-news trades, h = {hz}, 1x costs", _md(w), "",
-        f"## H2 at h = {hz} (every eligible trade, before the cap; prediction: positive)", _md(h), "",
+        f"## The same books by entry year, h = {hz}", _md(yr), "",
+        f"## Stress, h = {hz}: worst calendar quarter (by entry quarter) and five worst trades", _md(wq), "",
+        f"Five worst old-news trades, 1x costs:", _md(w), "",
+        f"## H2 at h = {hz}, {period} (every eligible trade, before the cap; prediction: positive)", _md(h), "",
         f"## Capacity (10% of entry-day put volume), old-news trades taken at h = {hz}",
         _md(pd.DataFrame([cap])), "",
         "`book_at_median_usd` = 5 slots x the median per-trade capacity: the book size at which half the "
@@ -486,6 +562,4 @@ def _summary_md(label: str, t: dict[str, pd.DataFrame], cap: dict, n_exit_2024: 
         "at its capacity.", "",
         "## Old-news book at every horizon", _md(hor), "",
     ]
-    if n_exit_2024:
-        lines += [f"Note: {n_exit_2024} headline discovery trades exit on or after 2024-01-01.", ""]
     return "\n".join(lines)

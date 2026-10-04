@@ -14,7 +14,7 @@ import pandas as pd           # noqa: E402
 from oldnews import trade     # noqa: E402
 
 FAILS = []
-DAYS = pd.bdate_range("2022-01-03", "2023-12-29")
+DAYS = pd.bdate_range("2024-01-02", "2025-12-31")
 
 
 def check(name, ok, detail=""):
@@ -121,11 +121,11 @@ def _toy(entries, exits, pnl, ids=None):
 
 
 def test_cap():
-    t = _toy(["2022-01-03"] * 7, ["2022-01-10"] * 7, [0.01] * 7, ids=[f"r{i}" for i in (6, 5, 4, 3, 2, 1, 0)])
+    t = _toy(["2024-01-03"] * 7, ["2024-01-10"] * 7, [0.01] * 7, ids=[f"r{i}" for i in (6, 5, 4, 3, 2, 1, 0)])
     taken = trade.simulate(t)
     check("cap: 7 same-day entries -> 5 taken", taken.sum() == 5)
     check("cap: ties taken by row_id", set(t.loc[taken, "row_id"]) == {"r0", "r1", "r2", "r3", "r4"})
-    t2 = pd.concat([t, _toy(["2022-01-10", "2022-01-07"], ["2022-01-20", "2022-01-20"], [0.0, 0.0],
+    t2 = pd.concat([t, _toy(["2024-01-10", "2024-01-07"], ["2024-01-20", "2024-01-20"], [0.0, 0.0],
                             ids=["a_frees", "b_full"])], ignore_index=True)
     tk2 = trade.simulate(t2)
     check("cap: an exit frees its slot for an entry the same day", bool(tk2[t2["row_id"] == "a_frees"].iloc[0]))
@@ -144,16 +144,16 @@ def test_cap():
 
 
 def test_equity_and_metrics():
-    t = _toy(["2022-01-03", "2022-01-04"], ["2022-01-14", "2022-01-18"], [-0.10, 0.05])
-    marks = pd.DataFrame({"row_id": ["r0", "r0", "r1"], "mark_date": pd.to_datetime(["2022-01-05", "2022-01-07",
-                                                                                     "2022-01-06"]),
+    t = _toy(["2024-01-03", "2024-01-04"], ["2024-01-14", "2024-01-18"], [-0.10, 0.05])
+    marks = pd.DataFrame({"row_id": ["r0", "r0", "r1"], "mark_date": pd.to_datetime(["2024-01-05", "2024-01-07",
+                                                                                     "2024-01-06"]),
                           "csp_net": [-0.20, -0.15, 0.02], "csp_net2x": [-0.21, -0.16, 0.01]})
     c = trade.equity(t, marks, "csp_net")
     check("closed equity ends at sum(pnl)/5", np.isclose(c["closed_pct"].iloc[-1], 100 * (-0.05) / 5))
     check("MTM equity ends where closed equity ends", np.isclose(c["mtm_pct"].iloc[-1], c["closed_pct"].iloc[-1]))
     on = c.set_index("date")
-    check("MTM carries the latest mark", np.isclose(on.loc["2022-01-06", "mtm_pct"], 100 * (-0.20 + 0.02) / 5))
-    check("n_open counts open positions", on.loc["2022-01-04", "n_open"] == 2 and on["n_open"].iloc[-1] == 0)
+    check("MTM carries the latest mark", np.isclose(on.loc["2024-01-06", "mtm_pct"], 100 * (-0.20 + 0.02) / 5))
+    check("n_open counts open positions", on.loc["2024-01-04", "n_open"] == 2 and on["n_open"].iloc[-1] == 0)
     m = trade.book_metrics(t, c, "csp_net")
     check("max drawdown closed = -2% (one -10% trade in a 5-slot book)", np.isclose(m["max_dd_closed_pct"], -2.0))
     check("max drawdown MTM is deeper (-4% at the worst mark)", np.isclose(m["max_dd_mtm_pct"], -4.0)
@@ -161,7 +161,7 @@ def test_equity_and_metrics():
     check("hit rate 50%", m["hit_rate_pct"] == 50.0)
     check("total return -1%", np.isclose(m["total_return_pct"], -1.0))
     check("drawdown is measured from the peak", np.isclose(trade.max_drawdown(pd.Series([10.0, 0.0])), -100 / 11))
-    w = trade.worst(_toy(["2022-01-03"] * 7, ["2022-01-10"] * 7, [0.03, -0.2, 0.01, -0.05, 0.0, -0.01, 0.02]),
+    w = trade.worst(_toy(["2024-01-03"] * 7, ["2024-01-10"] * 7, [0.03, -0.2, 0.01, -0.05, 0.0, -0.01, 0.02]),
                     "csp_net")
     check("five worst, worst first", len(w) == 5 and w["pnl_pct"].is_monotonic_increasing
           and np.isclose(w["pnl_pct"].iloc[0], -20.0))
@@ -170,7 +170,7 @@ def test_equity_and_metrics():
 
 
 def test_capacity():
-    t = _toy(["2022-01-03"] * 3, ["2022-01-10"] * 3, [0.01, 0.02, -0.01])
+    t = _toy(["2024-01-03"] * 3, ["2024-01-10"] * 3, [0.01, 0.02, -0.01])
     t["put_volume_entry"] = [25, 5, 1000]
     cap = trade.capacity(t)
     check("contracts = floor(10% of volume)", cap["max_contracts"].tolist() == [2, 0, 100])
@@ -205,80 +205,163 @@ def test_h2():
 
 # ------------------------------------------------------------------ guards and run
 
-def test_guards_and_run():
-    events, nulls, outcome, labels = synthetic(n_events=60, seed=7)
-    o = trade.prep_outcome(outcome)
-    bad = o.copy()
-    bad.loc[bad.index[0], "entry_date"] = pd.Timestamp("2024-01-02")
+def expect_refused(name, fn, exc=PermissionError, match=""):
     try:
-        trade.check_dates(bad, "discovery")
-        check("discovery entry in 2024 refused", False)
-    except ValueError:
-        check("discovery entry in 2024 refused", True)
-    late = o.copy()
-    late.loc[late.index[0], ["exit_date", "usable"]] = [pd.Timestamp("2026-01-05"), True]
-    try:
-        trade.check_dates(late, "insample")
-        check("usable exit in 2026 refused", False)
-    except ValueError:
-        check("usable exit in 2026 refused", True)
-    trade.check_dates(late, "holdout")
-    check("2026 allowed only for the gated holdout/oos labels", True)
-    try:
-        trade.check_dates(bad, "some_new_label")
-        check("unknown label gets discovery date rules", False)
-    except ValueError:
-        check("unknown label gets discovery date rules", True)
-    trade.check_dates(bad, "insample")
-    check("insample allows 2024 entries", True)
-    try:
-        trade.build_trades(trade.eligible_events(events, labels)[0], nulls, o, otm=0.03)
-        check("otm in the wrong units refused", False)
-    except ValueError:
-        check("otm in the wrong units refused", True)
+        fn()
+    except exc as e:
+        check(name, match in str(e), str(e)[:70])
+    else:
+        check(name, False, "no error raised")
 
+
+def test_window_guard():
+    events, nulls, outcome, labels = synthetic(n_events=40, seed=7)
+    o = trade.prep_outcome(outcome)
+    ok = {"events": events, "nulls": nulls, "outcome": o}
+    trade.check_dates(ok, "insample", {})
+    check("insample: clean 2024-25 tables pass", True)
+
+    def bump(frame, col, value, usable=None):
+        f = {k: v.copy() for k, v in ok.items()}
+        f[frame].loc[f[frame].index[0], col] = pd.Timestamp(value) if frame == "outcome" else value
+        if usable is not None:
+            f[frame].loc[f[frame].index[0], "usable"] = usable
+        return f
+
+    expect_refused("insample: outcome entry in 2023 refused", lambda: trade.check_dates(
+        bump("outcome", "entry_date", "2023-12-29"), "insample", {}), match="before 2024-01-01")
+    expect_refused("insample: event gap_start in 2023 refused", lambda: trade.check_dates(
+        bump("events", "gap_start", "2023-12-29"), "insample", {}), match="before 2024-01-01")
+    expect_refused("insample: ordinary-day t_pre in 2026 refused", lambda: trade.check_dates(
+        bump("nulls", "t_pre", "2026-01-02"), "insample", {}), match="on or after 2026-01-01")
+    expect_refused("insample: usable exit in 2026 refused", lambda: trade.check_dates(
+        bump("outcome", "exit_date", "2026-01-05", usable=True), "insample", {}), match="on or after 2026-01-01")
+    trade.check_dates(bump("outcome", "exit_date", "2026-01-05", usable=False), "insample", {})
+    check("insample: an unusable row's exit is never used", True)
+    sealed = {"HOLDOUT_START": "2024-06-03", "HOLDOUT_END": "2024-08-30"}
+    expect_refused("insample: dates inside the notebook's HOLDOUT window refused", lambda: trade.check_dates(
+        bump("outcome", "entry_date", "2024-07-15"), "insample", sealed), match="sealed window")
+    trade.check_dates(ok, "insample", {"HOLDOUT_START": "2023-06-01", "HOLDOUT_END": "2023-08-31"})
+    check("insample: a holdout window outside 2024-25 does not interfere", True)
+    check("placeholder holdout is 2023-06-01..2023-08-31",
+          trade.holdout_window({}) == (pd.Timestamp("2023-06-01"), pd.Timestamp("2023-08-31")))
+    check("holdout window is read from the notebook namespace",
+          trade.holdout_window(sealed) == (pd.Timestamp("2024-06-03"), pd.Timestamp("2024-08-30")))
+
+    for lab in ("discovery", "dryrun"):
+        expect_refused(f"{lab}: retired, check_label refuses", lambda lab=lab: trade.check_label(lab, {}),
+                       match="outside the allowed 2024-2025 window")
+        expect_refused(f"{lab}: load refuses before touching any file", lambda lab=lab: trade.load(lab),
+                       match="2023-06-01..2023-08-31")
+        expect_refused(f"{lab}: run refuses", lambda lab=lab: trade.run(lab, labels, NB={"RUN_HOLDOUT": True}),
+                       match="overlaps the sealed placeholder")
+    expect_refused("unknown label refused", lambda: trade.check_label("anything", {}), match="unknown label")
+    expect_refused("holdout: refused when RUN_HOLDOUT is missing", lambda: trade.check_label("holdout", {}),
+                   match="RUN_HOLDOUT")
+    expect_refused("holdout: refused when RUN_HOLDOUT is False",
+                   lambda: trade.check_label("holdout", {"RUN_HOLDOUT": False}), match="RUN_HOLDOUT")
+    expect_refused("holdout: refused with only a truthy RUN_HOLDOUT",
+                   lambda: trade.check_label("holdout", {"RUN_HOLDOUT": 1}), match="RUN_HOLDOUT")
+    trade.check_label("holdout", {"RUN_HOLDOUT": True})
+    check("holdout: allowed when RUN_HOLDOUT is True", True)
+    expect_refused("holdout: RUN_OOS does not unlock it", lambda: trade.check_label("holdout", {"RUN_OOS": True}),
+                   match="RUN_HOLDOUT")
+    expect_refused("oos: refused unless RUN_OOS is True", lambda: trade.check_label("oos", {"RUN_HOLDOUT": True}),
+                   match="RUN_OOS")
+    trade.check_label("oos", {"RUN_OOS": True})
+    check("oos: allowed when RUN_OOS is True", True)
+    expect_refused("oos: refused with the script's own namespace (no switch)", lambda: trade.check_label("oos"),
+                   match="RUN_OOS")
+    with tempfile.TemporaryDirectory() as d:                      # refusal happens before any file is read
+        expect_refused("oos: run refuses before reading files",
+                       lambda: trade.run("oos", labels, data_dir=Path(d), NB={}), match="RUN_OOS")
+        expect_refused("holdout: run refuses before reading files",
+                       lambda: trade.run("holdout", labels, data_dir=Path(d)), match="RUN_HOLDOUT")
+    # holdout with the switch on may use any dates (the judges choose them)
+    ev2, nu2, out2, lab2 = synthetic(n_events=60, seed=8)
+    shift = pd.DateOffset(years=-2)
+    for df, cols in ((ev2, ["filing_date", "t_pre", "t_0"]), (nu2, ["t_pre", "t_0"]), (out2, ["entry_date", "exit_date"])):
+        for c in cols:
+            df[c] = pd.to_datetime(df[c]) + shift
+    with tempfile.TemporaryDirectory() as d:
+        write(Path(d), "holdout", ev2, nu2, out2)
+        tables = trade.run("holdout", lab2, data_dir=Path(d), NB={"RUN_HOLDOUT": True}, log=False)
+        check("holdout: runs on judges' dates when RUN_HOLDOUT is True", len(tables["trades"]) > 0)
+
+
+def test_run_insample():
+    events, nulls, outcome, labels = synthetic(n_events=60, seed=7)
     with tempfile.TemporaryDirectory() as d:
         tmp = Path(d)
-        write(tmp, "discovery", events, nulls, outcome)
-        tables = trade.run("discovery", labels, data_dir=tmp)
-        out = tmp / "trade_discovery"
-        names = ["counts", "trades", "summary", "by_year", "worst", "equity", "capacity", "h2"]
+        write(tmp, "insample", events, nulls, outcome)
+        tables = trade.run("insample", labels, data_dir=tmp)
+        out = tmp / "trade_insample"
+        names = ["counts", "trades", "summary", "by_year", "by_quarter", "worst", "equity", "capacity", "h2"]
         check("run writes every table and summary.md",
               all((out / f"{n}.csv").exists() for n in names) and (out / "summary.md").exists())
         s = tables["summary"]
         check("summary has every book x horizon x cost",
-              len(s) == s["book"].nunique() * len(trade.HORIZONS) * 2 and {"old", "all_late", "null_r1", "null_r2"} <= set(s["book"]))
+              len(s) == s["book"].nunique() * len(trade.HORIZONS) * 2
+              and {"old", "all_late", "null_r1", "null_r2"} <= set(s["book"]))
         hd = s[(s["book"] == "old") & (s["horizon"] == "10")].set_index("cost")
         check("2x costs never beat 1x", hd.loc["2x", "total_return_pct"] < hd.loc["1x", "total_return_pct"])
         check("same trades at 1x and 2x", hd.loc["2x", "n_trades"] == hd.loc["1x", "n_trades"])
         y = tables["by_year"]
-        y = y[(y["book"] == "old") & (y["horizon"] == "10") & (y["cost"] == "1x")]
-        check("2022 reported separately and years add up", 2022 in set(y["year"])
-              and y["n_trades"].sum() == hd.loc["1x", "n_trades"]
-              and np.isclose(y["total_return_pct"].sum(), hd.loc["1x", "total_return_pct"]))
+        yo = y[(y["book"] == "old") & (y["horizon"] == "10") & (y["cost"] == "1x")]
+        check("2024 and 2025 reported separately and add up to the pooled book", set(yo["year"]) == {2024, 2025}
+              and yo["n_trades"].sum() == hd.loc["1x", "n_trades"]
+              and np.isclose(yo["total_return_pct"].sum(), hd.loc["1x", "total_return_pct"]))
+        check("by-year table covers every book and both costs",
+              set(y["book"]) == set(s["book"]) and set(y["cost"]) == {"1x", "2x"} and set(y["year"]) == {2024, 2025})
+        q = tables["by_quarter"]
+        qo = q[(q["book"] == "old") & (q["horizon"] == "10") & (q["cost"] == "1x")]
+        check("by-quarter table: quarters lie in 2024Q1..2025Q4 and add up to the pooled book",
+              set(qo["quarter"]) <= {f"{yr}Q{k}" for yr in (2024, 2025) for k in (1, 2, 3, 4)}
+              and np.isclose(qo["total_return_pct"].sum(), hd.loc["1x", "total_return_pct"]))
+        wq = trade.worst_quarter(q).set_index("cost")
+        check("worst quarter is the lowest quarter at each cost level",
+              np.isclose(wq.loc["1x", "total_return_pct"], qo["total_return_pct"].min())
+              and set(wq.index) == {"1x", "2x"})
+        t = tables["trades"]
+        lo, hi = pd.Timestamp("2024-01-01"), pd.Timestamp("2026-01-01")
+        used = pd.concat([pd.to_datetime(t["entry_date"]), pd.to_datetime(t["exit_date"])])
+        check("every trade date lies in [2024-01-01, 2026-01-01) (no panel or 2022-23 rows)",
+              ((used >= lo) & (used < hi)).all())
         led = pd.read_csv(tmp / "ledger.csv")
         check("every book and H2 variant logged to the ledger",
-              len(led) == len(s) // 2 + len(tables["h2"]) // 2 and set(led["kind"]) == {"trade_book", "H2"})
+              len(led) == len(s) // 2 + len(tables["h2"]) // 2 and set(led["kind"]) == {"trade_book", "H2"}
+              and (led["subset"] == "insample").all())
         md = (out / "summary.md").read_text(encoding="utf-8")
-        check("summary.md has the headline sections", all(k in md for k in ("Books at h = 10", "by year", "H2", "Capacity")))
-        tables2 = trade.run("discovery", labels, data_dir=tmp, log=False)
+        check("summary.md: pooled 2024-25 is the primary result, by-year alongside",
+              "pooled 2024-25 (primary)" in md and "by entry year" in md and "worst calendar quarter" in md
+              and "Five worst" in md)
+        check("summary.md has no 2022 stress section", "2022" not in md and "discovery" not in md.lower())
+        tables2 = trade.run("insample", labels, data_dir=tmp, log=False)
         check("run is reproducible", tables2["summary"].equals(tables["summary"]) and tables2["h2"].equals(tables["h2"]))
 
         # the pipeline calls run(label): labels come from classify's classified_<label>.csv, unscored dropped
         cl = labels.assign(scored=[i % 5 != 0 for i in range(len(labels))])
         cl.loc[~cl["scored"], "old"] = False                   # classify's convention for unscored events
-        cl.to_csv(tmp / "classified_discovery.csv", index=False)
-        tables3 = trade.run("discovery", data_dir=tmp, log=False)
+        cl.to_csv(tmp / "classified_insample.csv", index=False)
+        tables3 = trade.run("insample", data_dir=tmp, log=False)
         unscored = set(cl.loc[~cl["scored"], "row_id"])
         check("run(label) reads classified_<label>.csv and drops unscored events",
               len(tables3["trades"]) > 0 and not tables3["trades"]["row_id"].isin(unscored).any())
-        trade.run("discovery", data_dir=tmp, log=False, label_col="old", otm=5)
-        check("sensitivity runs write to their own folder", (tmp / "trade_discovery_1m_otm5_old" / "summary.md").exists())
+        trade.run("insample", data_dir=tmp, log=False, label_col="old", otm=5)
+        check("sensitivity runs write to their own folder",
+              (tmp / "trade_insample_1m_otm5_old" / "summary.md").exists())
+
+        # a table with a 2023 date is refused, not silently trimmed
+        bad = outcome.copy()
+        bad.loc[bad.index[0], "entry_date"] = "2023-12-29"
+        bad.to_csv(tmp / "outcome_insample.csv", index=False)
+        expect_refused("run refuses an outcome table with a 2023 entry",
+                       lambda: trade.run("insample", labels, data_dir=tmp, log=False), match="before 2024-01-01")
 
 
 if __name__ == "__main__":
     for fn in (test_filters, test_gap_and_label_filters, test_cap, test_equity_and_metrics, test_capacity, test_h2,
-               test_guards_and_run):
+               test_window_guard, test_run_insample):
         print(f"--- {fn.__name__}")
         fn()
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED: ' + ', '.join(FAILS)}")

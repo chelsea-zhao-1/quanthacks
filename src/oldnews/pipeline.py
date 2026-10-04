@@ -12,21 +12,28 @@ runs every step in order, each in its own module, and writes everything to data/
     5  trade     the cash-secured put on old news, net of costs, with capacity   trade_<label>/
     6  figures   fade curve, one-event walkthrough, placebo                       figures/<label>/
 
-Where the data come from. Steps 1-6 read only the API cache. Step 0 reuses the tables the discovery download
-wrote (data/playground/) when they exist. Otherwise (a judge's sealed window, or a clean machine) it builds them
-through the notebook's own functions exactly as the download did: every tag's disclosures, EDGAR acceptance
+Where the data come from. Steps 1-6 read only the API cache. Step 0 reuses the tables the 2024-2025 download wrote
+(data/playground/events_insample.csv and nulls_insample.csv) when they exist. Otherwise (the judges' sealed window,
+or a clean machine) it builds them through the notebook's own functions: every tag's disclosures, EDGAR acceptance
 times inside the notebook's build_events, and two matched ordinary days per filing (seed 20261003). Only with
 allow_fetch=True may those functions download what is missing, and then the option data for every row are
 downloaded too, one request at a time through the notebook's api_get, before any step computes anything.
 
-Date guards (CLAUDE.md and the test plan): discovery, the dry run and any unnamed label refuse an entry,
-pre-event or gap date on or after 2024-01-01; the confirmation window ("insample") refuses 2026 and clips every
-exit before 2026-01-01; the out-of-sample window runs only after a human sets RUN_OOS = True, and the sealed
-window only after the judges set RUN_HOLDOUT = True. Each module also checks its own dates.
+Labels and date guards (.claude/ctx/06_window_guard.md; the starter notebook's cells 9, 10 and 48; Massive: only
+2024-2025 may be looked at):
+
+    insample   the test. Every t_pre, t_0, gap, ordinary-day, panel and exit date lies in [2024-01-01, 2026-01-01)
+               and outside the notebook's sealed placeholder HOLDOUT_START..HOLDOUT_END.
+    holdout    the judges' sealed window: only when RUN_HOLDOUT is True; any dates; downloads allowed.
+    oos        2026, once, by a human: only when RUN_OOS is True; cache only.
+    discovery, dryrun   retired: any call refuses. (A dry run of the judges' path is `dry_run()`, label insample.)
+
+Each module also checks its own dates.
 
 Usage
     in the notebook:  pipeline.run_oldnews(start, end, label, allow_fetch=..., NB=globals())
-    in a terminal:    .venv/Scripts/python.exe src/oldnews/pipeline.py --label discovery
+    in a terminal:    .venv/Scripts/python.exe src/oldnews/pipeline.py --label insample
+                      .venv/Scripts/python.exe src/oldnews/pipeline.py --dry-run     (quiet; scratch folder; deleted)
 """
 from __future__ import annotations
 
@@ -38,7 +45,9 @@ import inspect
 import io
 import json
 import os
+import shutil
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -59,38 +68,49 @@ PLAYGROUND = ROOT / "data" / "playground"
 SEED = 20261003
 OOS_START = "2026-01-01"
 N_NULLS, NULL_WINDOW, NULL_GAP = 2, 60, 5      # ordinary days: per filing, +/- sessions, min sessions from any 8-K
-REQUESTS_PER_ROW = 28                          # upper bound per (ticker, pre-event session); measured mean 25 on the discovery download
-MEASURED_RPS = 6.0                             # requests per second measured sequentially on the discovery download
-FILINGS_PER_MONTH = 75                         # TOP_100 8-Ks (all tags) per month in the discovery window: 1,744 in 24 months
+REQUESTS_PER_ROW = 28                          # upper bound per (ticker, pre-event session), all three buckets
+MEASURED_RPS = 6.0                             # requests per second, sequential, on our key (a conservative figure)
+FILINGS_PER_MONTH = 75                         # rough count of TOP_100 8-Ks (all tags) per month, for the step-0 estimate only
 PANEL_EXTRA = 400                              # at most this many extra ticker-dates priced only for the market panel (r_mkt)
 FAILURES_TO_STOP = 5                           # consecutive API failures before a download stops (CLAUDE.md rule 17)
-ZREF_FROZEN = SRC / "oldnews" / "zref_frozen.json"   # default location of the z-score constants (classify.FROZEN_PATH wins); read here, never written
-FREEZING_LABEL = "discovery"                   # the window the constants are frozen from: it may run steps 0-2 before they exist
+ZREF_FROZEN = SRC / "oldnews" / "zref_frozen_insample.json"   # the z-score constants (classify.frozen_path() wins); read here, never written. The old zref_frozen.json is a retired archive and is never read.
+FREEZING_LABEL = "insample"                    # the test label: it may run steps 0-2 before the constants exist (they are frozen from its gap tables)
+SEALED_PLACEHOLDER = ("2023-06-01", "2023-08-31")    # the notebook's HOLDOUT_START..HOLDOUT_END when NB does not say
+RETIRED_LABELS = ("discovery", "dryrun")
+RETIRED_MESSAGE = ("2022-2023 is outside the allowed 2024-2025 window and overlaps the sealed placeholder "
+                   "(2023-06-01..2023-08-31)")
+STAGES = ("inputs", "events", "measure", "classify", "tests", "trade", "figures")
 
 
 @dataclass(frozen=True)
 class Window:
     start: str
     end: str
-    hard_stop: str | None             # no t_pre, t_0 or gap date on or after this day (None: the judges' or OOS window)
+    hard_stop: str | None             # no date on or after this day (None: the judges' or OOS window)
     clip_before: str | None = None    # no option bar, so no exit, on or after this day
-    source: str | None = None         # another label's prepared tables to cut to this window
+    first_date: str | None = None     # no date before this day
 
 
-WINDOWS = {
-    "discovery": Window("2022-01-01", "2023-12-31", hard_stop="2024-01-01"),
-    "dryrun":    Window("2023-07-01", "2023-12-31", hard_stop="2024-01-01", source="discovery"),
-    "insample":  Window("2024-01-01", "2025-12-31", hard_stop="2026-01-01", clip_before="2026-01-01"),
-}
-DEFAULT_RULES = Window("", "", hard_stop="2024-01-01")
+WINDOWS = {"insample": Window("2024-01-01", "2025-12-31", hard_stop="2026-01-01", clip_before="2026-01-01",
+                              first_date="2024-01-01")}
+
+
+def check_label(label: str) -> None:
+    """Refuse the retired labels, everywhere (pipeline, figures, report): no code path reads 2022-2023."""
+    if label in RETIRED_LABELS:
+        raise PermissionError(f"label {label!r} is retired: {RETIRED_MESSAGE}.")
+
+
+_QUIET = False
 
 
 def log(msg: str) -> None:
-    print(f"[oldnews {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    if not _QUIET:
+        print(f"[oldnews {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
 class FrozenConstantsMissing(RuntimeError):
-    """src/oldnews/zref_frozen.json is not there or is unusable. Not a FileNotFoundError, so a notebook cell never
+    """src/oldnews/zref_frozen_insample.json is not there or is unusable. Not a FileNotFoundError, so a notebook cell never
     mistakes it for "this window is not in the cache"."""
 
 
@@ -98,23 +118,22 @@ def frozen_path() -> Path:
     """Where classify reads the frozen constants (one source of truth), else the default location."""
     try:
         from oldnews import classify
-        return Path(classify.FROZEN_PATH)
+        return Path(classify.frozen_path("insample"))
     except (ImportError, AttributeError):
         return ZREF_FROZEN
 
 
 def check_frozen_constants(path: Path | None = None) -> str:
-    """Read-only preflight: the z-score constants (frozen from discovery, committed) must exist and be valid.
-    Returns the first 12 characters of the file's SHA-256 for the run log. This pipeline never writes the file:
-    the only writer is classify.freeze, run once by a person on the discovery data."""
+    """Read-only preflight: the z-score constants (frozen once, committed) must exist and be valid. Returns the
+    first 12 characters of the file's SHA-256 for the run log. This pipeline never writes the file: the only
+    writer is classify.freeze, run once by a person."""
     path = Path(path or frozen_path())
     if not path.is_file():
         raise FrozenConstantsMissing(
-            f"{path} is missing. It holds the z-score constants frozen from the discovery window, so that every "
-            "window (discovery, confirmation, the judges' sealed window) is standardised the same way; it is "
-            "committed with the code. Restore it with `git checkout -- src/oldnews/zref_frozen.json`. If it was "
-            "never created, a person runs oldnews.classify.freeze() once on the discovery data and commits it "
-            "(the pipeline does not create it).")
+            f"{path} is missing. It holds the z-score constants, frozen once so that every window (the 2024-2025 "
+            "test and the judges' sealed window) is standardised the same way; it is committed with the code. "
+            "Restore it with `git checkout -- src/oldnews/zref_frozen_insample.json`. If it was never created, a person runs "
+            "oldnews.classify.freeze('insample') once and commits it (the pipeline does not create it).")
     try:
         from oldnews import classify
         classify.load_frozen(path)                 # the stats module's own validation, read only
@@ -122,26 +141,44 @@ def check_frozen_constants(path: Path | None = None) -> str:
         pass
     except (ValueError, KeyError, OSError) as e:
         raise FrozenConstantsMissing(f"{path} is not usable ({e}). Restore it with "
-                                     "`git checkout -- src/oldnews/zref_frozen.json`.") from e
+                                     "`git checkout -- src/oldnews/zref_frozen_insample.json`.") from e
     return hashlib.sha256(path.read_bytes()).hexdigest()[:12]
 
 
+def frozen_window_warning(path: Path | None = None) -> str | None:
+    """A warning (not a refusal) when the frozen file says it was computed from dates before 2024-01-01."""
+    path = Path(path or frozen_path())
+    try:
+        first = json.loads(path.read_text(encoding="utf-8"))["window_t_0"]["first"]
+        if pd.Timestamp(first) < pd.Timestamp("2024-01-01"):
+            return (f"WARNING: the frozen z-score constants were computed from dates as early as {first}, before the "
+                    "allowed 2024-2025 window; re-freeze them (classify.freeze) before this run is used in a deliverable")
+    except (OSError, KeyError, ValueError, TypeError):
+        pass
+    return None
+
+
 def estimate(n_requests: int, rps: float = MEASURED_RPS) -> str:
-    """"~N requests, about M minutes" at the sequential rate measured on the discovery download."""
+    """"~N requests, about M minutes" at the sequential rate measured on our key."""
     minutes = n_requests / rps / 60
     span = f"{minutes:.0f} minutes" if minutes < 90 else f"{minutes / 60:.1f} hours"
     return f"~{n_requests:,} requests, about {span} at {rps:g} requests per second"
 
 
 def market_panel_rows(rows: pd.DataFrame, raw_ev: pd.DataFrame, raw_nu: pd.DataFrame,
-                      max_extra: int = PANEL_EXTRA, seed: int = SEED) -> pd.DataFrame:
+                      max_extra: int = PANEL_EXTRA, seed: int = SEED, w: Window | None = None,
+                      NB: dict | None = None) -> pd.DataFrame:
     """Extra (ticker, t_pre, t_0) rows priced only to widen r_mkt's ticker panel: a seeded sample, at most
     `max_extra`, of the window's filings and ordinary days that the run does not already price. The rows the run
-    prices are in the panel anyway (measure adds every one it prices)."""
+    prices are in the panel anyway (measure adds every one it prices). With a guarded window `w` (insample) only
+    rows with every date in [first_date, hard_stop) and outside the sealed placeholder qualify: the panel never
+    uses 2022-2023 rows, whatever the prepared tables hold."""
     cols = ["ticker", "t_pre", "t_0"]
     have = set(zip(rows["ticker"], pd.to_datetime(rows["t_pre"])))
     pool = pd.concat([raw_ev[cols], raw_nu[cols]], ignore_index=True)
     pool["t_pre"], pool["t_0"] = pd.to_datetime(pool["t_pre"]), pd.to_datetime(pool["t_0"])
+    if w is not None:
+        pool = pool[in_bounds(pool, w, NB)]
     pool = pool.drop_duplicates(["ticker", "t_pre"]).sort_values(["t_pre", "ticker"])
     pool = pool[[(t, d) not in have for t, d in zip(pool["ticker"], pool["t_pre"])]].reset_index(drop=True)
     if len(pool) > max_extra:
@@ -157,6 +194,13 @@ def flag(s: pd.Series) -> pd.Series:
 # ---------------------------------------------------------------------------------------------------------
 # Guards
 # ---------------------------------------------------------------------------------------------------------
+def sealed_range(NB: dict | None) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """The notebook's sealed placeholder (HOLDOUT_START..HOLDOUT_END), else the starter's default."""
+    NB = NB or {}
+    return (pd.Timestamp(NB.get("HOLDOUT_START") or SEALED_PLACEHOLDER[0]),
+            pd.Timestamp(NB.get("HOLDOUT_END") or SEALED_PLACEHOLDER[1]))
+
+
 def window_rules(NB: dict, start: str, end: str, label: str) -> Window:
     """The date rules for this run. Refuses anything the hard rules forbid; never switches a guard on."""
     for name, d in (("start", start), ("end", end)):
@@ -166,7 +210,7 @@ def window_rules(NB: dict, start: str, end: str, label: str) -> Window:
             raise ValueError(f"{name} = {d!r} is not a real date") from None
     if not start < end:
         raise ValueError(f"start {start} must be before end {end}")
-    oos_start = NB.get("OOS_START", OOS_START)
+    check_label(label)
     if label == "oos":
         if NB.get("RUN_OOS") is not True:
             raise PermissionError("the out-of-sample window runs only after a human sets RUN_OOS = True (section 2)")
@@ -176,23 +220,48 @@ def window_rules(NB: dict, start: str, end: str, label: str) -> Window:
         if NB.get("RUN_HOLDOUT") is not True:
             raise PermissionError("the sealed window runs only after the judges set RUN_HOLDOUT = True (section 2)")
         return Window(start, end, hard_stop=None)
-    rules = WINDOWS.get(label, DEFAULT_RULES)
-    if not rules.hard_stop <= oos_start:
-        raise PermissionError(f"label {label!r} would reach the out-of-sample period; refusing")
-    if end >= rules.hard_stop:
-        raise PermissionError(f"label {label!r} allows dates before {rules.hard_stop} only; end = {end}")
+    if label != "insample":
+        raise PermissionError(f"unknown label {label!r}: the labels are insample (the test), holdout (the judges' "
+                              "sealed window) and oos (one human run); discovery and dryrun are retired")
+    rules = WINDOWS["insample"]
+    if start < rules.first_date or end >= rules.hard_stop:
+        raise PermissionError(f"label 'insample' allows filings from {rules.first_date} to before {rules.hard_stop} only; "
+                              f"got {start}..{end}")
+    s0, s1 = sealed_range(NB)
+    if pd.Timestamp(start) <= s1 and pd.Timestamp(end) >= s0:
+        raise PermissionError(f"{start}..{end} overlaps the sealed placeholder {s0.date()}..{s1.date()}; refusing")
     return replace(rules, start=start, end=end)
 
 
-def check_dates(df: pd.DataFrame, hard_stop: str | None, what: str) -> None:
-    """Hard fail: no pre-event, entry or gap date on or after hard_stop."""
-    if hard_stop is None or df is None or df.empty:
-        return
-    for col in ("t_pre", "t_0", "gap_start"):
+DATE_COLUMNS = ("t_pre", "t_0", "gap_start")
+
+
+def in_bounds(df: pd.DataFrame, w: Window, NB: dict | None = None) -> pd.Series:
+    """True where every date column present (t_pre, t_0, gap_start) lies in [first_date, hard_stop) and outside the
+    sealed placeholder; a missing date (NaT) does not exclude a row. All True for the unguarded windows."""
+    ok = pd.Series(True, index=df.index)
+    if w.hard_stop is None:
+        return ok
+    s0, s1 = sealed_range(NB)
+    for col in DATE_COLUMNS:
         if col in df:
-            bad = pd.to_datetime(df[col]) >= pd.Timestamp(hard_stop)
-            if bad.any():
-                raise PermissionError(f"{int(bad.sum())} {what} rows have {col} on or after {hard_stop}; refusing")
+            d = pd.to_datetime(df[col])
+            bad = (d >= pd.Timestamp(w.hard_stop)) | ((d >= s0) & (d <= s1))
+            if w.first_date:
+                bad |= d < pd.Timestamp(w.first_date)
+            ok &= ~bad.fillna(False)
+    return ok
+
+
+def check_dates(df: pd.DataFrame, w: Window, what: str, NB: dict | None = None) -> None:
+    """Hard fail: no pre-event, entry or gap date outside the window or inside the sealed placeholder."""
+    if w.hard_stop is None or df is None or df.empty:
+        return
+    bad = ~in_bounds(df, w, NB)
+    if bad.any():
+        raise PermissionError(f"{int(bad.sum())} {what} rows have a t_pre, t_0 or gap_start outside "
+                              f"[{w.first_date}, {w.hard_stop}) or inside the sealed placeholder; refusing. The module "
+                              "that built this table must drop its window-edge rows.")
 
 
 @contextlib.contextmanager
@@ -275,7 +344,7 @@ def slice_prepared(source: str, start: str, end: str) -> tuple[pd.DataFrame, pd.
 
 def build_from_api(NB: dict, start: str, end: str, hard_stop: str | None, allow_fetch: bool = False
                    ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """The discovery download's event and ordinary-day tables (src/discovery_fetch.py), for any window.
+    """The download's event and ordinary-day tables (src/discovery_fetch.py), for any window.
 
     Every tag in the taxonomy goes through the notebook's build_events, so acceptance times and the sessions
     they imply (t_0, t_pre) come from the same code in every window, and the disclosures and EDGAR headers that
@@ -286,7 +355,7 @@ def build_from_api(NB: dict, start: str, end: str, hard_stop: str | None, allow_
     months = max((pd.Timestamp(end) - pd.Timestamp(start)).days / 30.4, 1.0)
     headers = int(round(months * FILINGS_PER_MONTH))
     log(f"0 inputs: {len(tags)} disclosure queries (about 1 to 3 requests each) plus one SEC EDGAR header per TOP_100 "
-        f"filing, about {headers:,} (rough, from our discovery window); " + estimate(len(tags) * 2 + headers, 5.0)
+        f"filing, about {headers:,} (rough); " + estimate(len(tags) * 2 + headers, 5.0)
         + ". Each response is cached after the first run." if allow_fetch else
         f"0 inputs: {len(tags)} disclosure queries and one cached EDGAR header per TOP_100 filing (cache only)")
     parts, quiet = [], io.StringIO()
@@ -314,7 +383,7 @@ def build_from_api(NB: dict, start: str, end: str, hard_stop: str | None, allow_
 
 
 def draw_nulls(NB: dict, events: pd.DataFrame, start: str, end: str, hard_stop: str | None) -> pd.DataFrame:
-    """Ordinary days exactly as the discovery download drew them: same ticker, within +/-60 sessions of the
+    """Ordinary days exactly as the download drew them: same ticker, within +/-60 sessions of the
     filing-date session, more than 5 sessions from both sessions any 8-K of that ticker can enter at, two per
     filing, seed 20261003, never outside the window nor after the last completed session."""
     CAL = NB["CAL"]
@@ -339,7 +408,9 @@ def draw_nulls(NB: dict, events: pd.DataFrame, start: str, end: str, hard_stop: 
 
 def prepare_inputs(NB: dict, w: Window, label: str, source: str | None, allow_fetch: bool = False
                    ) -> tuple[pd.DataFrame, pd.DataFrame, str]:
-    """Step 0. Returns (filings, ordinary days, where they came from) and writes them to data/oldnews/raw/."""
+    """Step 0. Returns (filings, ordinary days, where they came from) and writes them to data/oldnews/raw/.
+    Rows with a date outside the window (a filing in the first days of 2024 whose last close before acceptance was in
+    2023) are dropped here and counted."""
     if source != "api" and has_prepared(source or label):
         src = source or label
         ev, nu = slice_prepared(src, w.start, w.end)
@@ -347,8 +418,13 @@ def prepare_inputs(NB: dict, w: Window, label: str, source: str | None, allow_fe
     else:
         ev, nu = build_from_api(NB, w.start, w.end, w.hard_stop, allow_fetch)
         origin = "the API, through the notebook's own cached functions"
-    check_dates(ev, w.hard_stop, "filing")
-    check_dates(nu, w.hard_stop, "ordinary-day")
+    ok_ev, ok_nu = in_bounds(ev, w, NB), in_bounds(nu, w, NB)
+    if not (ok_ev.all() and ok_nu.all()):
+        log(f"0 inputs: dropped {int((~ok_ev).sum())} filings and {int((~ok_nu).sum())} ordinary days with a date outside "
+            f"[{w.first_date}, {w.hard_stop}) or inside the sealed placeholder (window edge)")
+        ev, nu = ev[ok_ev].reset_index(drop=True), nu[ok_nu].reset_index(drop=True)
+    check_dates(ev, w, "filing", NB)
+    check_dates(nu, w, "ordinary-day", NB)
     RAW.mkdir(parents=True, exist_ok=True)
     ev.to_csv(RAW / f"events_{label}.csv", index=False)
     nu.to_csv(RAW / f"nulls_{label}.csv", index=False)
@@ -441,12 +517,45 @@ def default_steps() -> Steps:
     return steps
 
 
-def events_step(fn: Callable, NB: dict, label: str, w: Window) -> tuple[pd.DataFrame, pd.DataFrame]:
+@contextlib.contextmanager
+def superset_disclosures(NB: dict, superset: Window | None):
+    """Cache only: answer a disclosure query for a sub-window from the cached response for the superset window,
+    filtered by filing date. The API cache is keyed by the full URL, so a sub-window's own query (the dry run's
+    2024-07 to 2024-12) is not in it, but the full 2024-2025 window's responses are, and a narrower query returns
+    exactly the rows of the wider one that fall inside its dates. A query the cache cannot answer still raises
+    CacheMiss."""
+    from playground.measure import CacheMiss
+
+    if superset is None or "fetch_disclosures" not in NB:
+        yield
+        return
+    orig = NB["fetch_disclosures"]
+
+    def fetch(tag: str, start: str, end: str) -> pd.DataFrame:
+        try:
+            return orig(tag, start, end)
+        except CacheMiss:
+            df = orig(tag, superset.start, superset.end)
+            if df.empty:
+                return df
+            fd = pd.to_datetime(df["filing_date"])
+            return df[(fd >= pd.Timestamp(start)) & (fd <= pd.Timestamp(end))].reset_index(drop=True)
+
+    NB["fetch_disclosures"] = fetch
+    try:
+        yield
+    finally:
+        NB["fetch_disclosures"] = orig
+
+
+def events_step(fn: Callable, NB: dict, label: str, w: Window, superset: Window | None = None
+                ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """events.build for this run's own dates: `window=(first filing date, last filing date)`. The module owns the
     date guard and the switch each label needs (RUN_HOLDOUT for the sealed window, RUN_OOS for 2026), the
-    acceptance-time sessions and the look-backs, and reads the ordinary days from data/oldnews/raw/. The dry run
-    gets exactly what the judges' window gets: its own dates, no history from before them."""
-    with restoring(NB):
+    acceptance-time sessions and the look-backs, and reads the ordinary days from data/oldnews/raw/. A sub-window
+    gets exactly what the judges' window gets: its own dates, no history from before them. `superset` (the full
+    2024-2025 window) lets a cache-only run answer its disclosure queries from the cached wider window."""
+    with restoring(NB), superset_disclosures(NB, None if label == "holdout" else superset):
         return _call(fn, label, NB=NB, window=(w.start, w.end), out_dir=OUT, playground=RAW)
 
 
@@ -467,66 +576,114 @@ def _summary(folder: Path) -> str | None:
 # ---------------------------------------------------------------------------------------------------------
 # The whole test
 # ---------------------------------------------------------------------------------------------------------
+@contextlib.contextmanager
+def _output_root(out_dir: Path | None):
+    """Point every output at `out_dir` for the block (a scratch folder for the dry run), then restore."""
+    global OUT, RAW
+    if out_dir is None:
+        yield
+        return
+    saved = OUT, RAW
+    OUT = Path(out_dir)
+    RAW = OUT / "raw"
+    OUT.mkdir(parents=True, exist_ok=True)
+    try:
+        yield
+    finally:
+        OUT, RAW = saved
+
+
+@contextlib.contextmanager
+def _quiet(on: bool):
+    """Silence this module's log and every step's prints (the stats module prints its headline result)."""
+    global _QUIET
+    if not on:
+        yield
+        return
+    saved, _QUIET = _QUIET, True
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            yield
+    finally:
+        _QUIET = saved
+
+
 def run_oldnews(start: str, end: str, label: str, allow_fetch: bool = False, NB: dict | None = None,
                 source: str | None = None, market_panel: bool = True, panel_max_extra: int = PANEL_EXTRA,
-                max_requests: int | None = None, steps: Steps | None = None, figures: bool = True) -> dict:
+                max_requests: int | None = None, steps: Steps | None = None, figures: bool = True,
+                out_dir: Path | None = None, quiet: bool = False, stages: dict | None = None) -> dict:
     """Run the hypothesis test on filings dated start..end and return every table it produced.
 
-    label         names the outputs and sets the date rules: "discovery", "dryrun", "insample" (confirmation),
-                  "holdout" (the judges' sealed window), "oos" (one-time human run); anything else gets the
-                  discovery rules.
+    label         "insample" (the test, 2024-2025), "holdout" (the judges' sealed window, needs RUN_HOLDOUT) or
+                  "oos" (one human run, needs RUN_OOS, cache only). "discovery" and "dryrun" are retired and refused.
     allow_fetch   False: cache only; a missing response stops the run. True: the notebook's own cached API
-                  functions download what is missing first (the judges' path). Never set it for research runs.
+                  functions download what is missing first (the judges' path). Never set it for the test window.
     NB            the notebook namespace (pass globals() in the notebook); loaded from the notebook if None.
-    source        another label's prepared tables to cut to this window (the dry run uses "discovery"), or
-                  "api" to build the inputs through the API functions even when prepared tables exist.
+    source        "api" to build the inputs through the API functions even when prepared tables exist.
     market_panel  also price a seeded sample of at most `panel_max_extra` (default 400) ticker-dates beyond the
                   rows the run prices, so r_mkt (the market's return over the gap) is the median across more
-                  TOP_100 tickers (test plan). The rows the run prices are in the panel anyway.
+                  TOP_100 tickers (test plan). For insample only rows inside 2024-2025 qualify.
     max_requests  with allow_fetch: refuse before fetching if the printed estimate exceeds this many requests.
+    out_dir       write everything here instead of data/oldnews/ (a scratch folder).
+    quiet         print nothing (no log, no step output, no results).
+    stages        a dict to fill with each stage's status ("ran") as it finishes, even if a later one fails.
 
-    Needs src/oldnews/zref_frozen.json (read, never written); without it the run stops before fetching anything.
+    Needs src/oldnews/zref_frozen_insample.json (read, never written); without it the run stops before fetching anything.
     """
+    check_label(label)
+    with _output_root(out_dir), _quiet(quiet):
+        return _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel_max_extra, max_requests,
+                            steps, figures, {} if stages is None else stages)
+
+
+def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel_max_extra, max_requests, steps,
+                 figures, stages: dict) -> dict:
     t_start = time.time()
     if NB is None:
         import nb
         NB = nb.load()
     w = window_rules(NB, start, end, label)
+    if label == "oos" and allow_fetch:
+        raise PermissionError("the out-of-sample window is cache only (allow_fetch must be False)")
     try:
         zref_sha: str | None = check_frozen_constants()
     except FrozenConstantsMissing as e:
         if label != FREEZING_LABEL:
             raise FrozenConstantsMissing(f"{e} Nothing was fetched or computed.") from e
         zref_sha = None
-        log("the frozen z-score constants do not exist yet (discovery is the window they are frozen from): steps 0 "
-            "to 2 will run, then the run stops before classify")
+        log("the frozen z-score constants do not exist yet: steps 0 to 2 will run, then the run stops before classify")
+    warning = frozen_window_warning() if zref_sha else None
+    if warning:
+        log(warning)
     if source and source != "api" and not has_prepared(source):
         raise FileNotFoundError(f"no prepared tables for {source!r} in {PLAYGROUND}")
-    if source is None and w.source and has_prepared(w.source):
-        source = w.source            # the dry run cuts discovery's tables; on a clean machine it takes the API path
+    full = WINDOWS["insample"]
+    superset = full if label == "insample" and (w.start, w.end) != (full.start, full.end) else None
     steps = steps or default_steps()
     if steps.missing:
         log(f"not available yet: {', '.join(steps.missing)} (the run stops at the first of them)")
     OUT.mkdir(parents=True, exist_ok=True)
     log(f"{label}: filings {w.start}..{w.end}; "
-        f"{'no t_pre, t_0 or gap date on or after ' + w.hard_stop if w.hard_stop else 'the judges/OOS window'}; "
+        f"{'every date in [' + w.first_date + ', ' + w.hard_stop + '), outside the sealed placeholder' if w.hard_stop else 'the judges/OOS window'}; "
         f"{'no exit on or after ' + w.clip_before if w.clip_before else 'exits up to the last session'}; "
         f"{'fetch allowed' if allow_fetch else 'cache only'}; frozen z-score constants {zref_sha or 'not yet'}")
 
-    result: dict[str, Any] = {"label": label, "start": w.start, "end": w.end, "window": w}
+    result: dict[str, Any] = {"label": label, "start": w.start, "end": w.end, "window": w, "stages": stages}
     stop = w.hard_stop              # None for the sealed and out-of-sample windows: measure decides by label and switch
     with sandbox(NB, allow_fetch, w.clip_before):
         raw_ev, raw_nu, origin = prepare_inputs(NB, w, label, source, allow_fetch)
+        stages["inputs"] = "ran"
         log(f"0 inputs: {len(raw_ev)} TOP_100 filings and {len(raw_nu)} ordinary days, from {origin}")
 
-        ev, nu = events_step(steps.events, NB, label, w)
-        check_dates(ev, w.hard_stop, "event")
-        check_dates(nu, w.hard_stop, "ordinary-day")
+        ev, nu = events_step(steps.events, NB, label, w, superset)
+        check_dates(ev, w, "event", NB)
+        check_dates(nu, w, "ordinary-day", NB)
         result.update(events=ev, nulls=nu)
+        stages["events"] = "ran"
         log(f"1 events: {len(ev)} filings in the people and placebo sets, {len(nu)} matched ordinary days")
 
         rows = measurement_rows(ev, nu)
-        panel = market_panel_rows(rows, raw_ev, raw_nu, panel_max_extra) if market_panel else None
+        panel = market_panel_rows(rows, raw_ev, raw_nu, panel_max_extra, w=w, NB=NB) if market_panel else None
         if panel is not None:
             log(f"2 measure: the market panel adds {len(panel)} ticker-dates to the {len(rows)} rows priced "
                 f"(at most {panel_max_extra}, seed {SEED})")
@@ -537,32 +694,36 @@ def run_oldnews(start: str, end: str, label: str, allow_fetch: bool = False, NB:
             gap, outcome = _call(steps.measure, rows, label, NB=NB, panel_rows=panel,
                                  **({"hard_stop": stop} if stop else {}), out_dir=OUT)
         result.update(gap=gap, outcome=outcome)
+        stages["measure"] = "ran"
         n_ok = int(flag(gap["usable"]).sum()) if "usable" in gap else 0
         log(f"2 measure: {len(gap)} gap rows ({n_ok} usable), {len(outcome)} outcome rows")
 
-        if zref_sha is None:                       # discovery's first run: the constants come from its own gap tables
+        if zref_sha is None:                       # the first run of the test: the constants come from its own gap tables
             try:
                 zref_sha = check_frozen_constants()
             except FrozenConstantsMissing as e:
                 raise FrozenConstantsMissing(
                     f"{e}\n\nSteps 0 to 2 are finished and saved in {OUT} (events, nulls, gap, outcome for "
                     f"{label!r}; measure is resumable, so a rerun skips them). Next: a person freezes the constants "
-                    "once from these discovery tables (oldnews.classify.freeze()), commits the file, and reruns "
-                    "this step.") from e
+                    "once (oldnews.classify.freeze('insample')), commits the file, and reruns this step.") from e
         classified = _call(steps.classify, label, data_dir=OUT, NB=NB)
         result["classified"] = classified
+        stages["classify"] = "ran"
         log(f"3 classify: {len(classified)} filings scored, "
             f"{int(flag(classified['old']).sum()) if 'old' in classified else '?'} labelled old news")
 
         result["tests"] = _call(steps.tests, label, data_dir=OUT, NB=NB)
         result["tests_summary"] = _summary(OUT / f"results_{label}")
+        stages["tests"] = "ran"
         log("4 tests: written to " + str(OUT / f"results_{label}"))
         result["trade"] = _call(steps.trade, label, labels=classified, data_dir=OUT)
         result["trade_summary"] = _summary(OUT / f"trade_{label}")
+        stages["trade"] = "ran"
         log("5 trade: written to " + str(OUT / f"trade_{label}"))
 
         if figures:
             result["figures"] = make_figures(result, NB)
+            stages["figures"] = "ran"
             log(f"6 figures: {', '.join(result['figures'])} in {OUT / 'figures' / label}")
 
     (OUT / f"run_{label}.json").write_text(json.dumps(
@@ -572,6 +733,40 @@ def run_oldnews(start: str, end: str, label: str, allow_fetch: bool = False, NB:
          "ordinary_days": len(nu), "finished": time.strftime("%Y-%m-%d %H:%M:%S"),
          "minutes": round((time.time() - t_start) / 60, 1)}, indent=1))
     return result
+
+
+DRY_RUN_WINDOW = ("2024-07-01", "2024-12-31")
+
+
+def dry_run(start: str = DRY_RUN_WINDOW[0], end: str = DRY_RUN_WINDOW[1], NB: dict | None = None) -> dict:
+    """A quiet end-to-end check that the judges' path runs, on a sub-window of 2024, from the cache only.
+
+    It runs label insample with every output in a temporary scratch folder, which it deletes afterwards, and prints
+    only: the number of events, the wall time, and whether each stage ran. It never prints a result or a table.
+    Run it only once the 2024-2025 download has finished."""
+    t0 = time.time()
+    scratch = Path(tempfile.mkdtemp(prefix="oldnews_dryrun_"))
+    stages: dict[str, str] = {}
+    n_events, error = None, None
+    try:
+        res = run_oldnews(start, end, "insample", allow_fetch=False, NB=NB, out_dir=scratch, quiet=True, stages=stages)
+        n_events = len(res["events"])
+    except Exception as e:  # noqa: BLE001 (report the type and the first words of the message, never a table)
+        error = f"{type(e).__name__}: {str(e)[:200]}"
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    wall = time.time() - t0
+    out = {"events": n_events, "wall_seconds": round(wall, 1), "stages": stages, "error": error,
+           "scratch_deleted": not scratch.exists()}
+    print(f"dry run of the judges' path: label insample, filings {start}..{end}, cache only")
+    print(f"events in the people and placebo sets: {n_events if n_events is not None else 'n/a'}")
+    first_missing = next((s for s in STAGES if s not in stages), None)
+    for st in STAGES:
+        print(f"  {st}: {stages.get(st) or ('FAILED' if st == first_missing and error else 'not reached')}")
+    if error:
+        print(f"stopped: {error}")
+    print(f"wall time: {wall / 60:.1f} minutes ({wall:.0f} s); scratch folder deleted: {out['scratch_deleted']}")
+    return out
 
 
 def report(result: dict) -> None:
@@ -615,7 +810,10 @@ def notebook_run(start: str, end: str, label: str, allow_fetch: bool = False, NB
 # ---------------------------------------------------------------------------------------------------------
 def spot_path(NB: dict, row: pd.Series, before: int = 5, after: int = 21, bucket: str = "1m") -> pd.Series:
     """Daily parity spot for one event, from `before` sessions ahead of its gap to `after` sessions past entry,
-    from the same pricing object the measurement uses (call inside sandbox(): cache only by default)."""
+    from the same pricing object, and the same fresh-mark rule, the measurement uses (call inside sandbox():
+    cache only by default)."""
+    from oldnews import measure
+
     CAL = NB["CAL"]
     t_pre, t_0 = pd.Timestamp(row["t_pre"]), pd.Timestamp(row["t_0"])
     priced, _ = NB["price_event"](row["ticker"], t_pre, t_0, t_0, NB["EXPIRY_BUCKETS"], NB["OTM_GRID"])
@@ -625,43 +823,94 @@ def spot_path(NB: dict, row: pd.Series, before: int = 5, after: int = 21, bucket
     first = CAL[max(CAL.searchsorted(pd.Timestamp(row["gap_start"])) - before, 0)]
     last = min(CAL[min(CAL.searchsorted(t_0) + after, len(CAL) - 1)], pe.expiry_session, NB["LAST_SESSION"])
     days = CAL[(CAL >= first) & (CAL <= last)]
-    return pd.Series([pe.synthetic_spot(d) for d in days], index=days, name="spot")
+    return measure.spot_path(pe, days).rename("spot")
+
+
+WALK_NOTE = ("Illustrative filing, chosen without looking at outcomes: old news, all three math inputs, "
+             "median gap length.")
 
 
 def make_figures(result: dict, NB: dict | None, show: bool = False) -> dict[str, Path]:
-    """The three figures for one run, saved to data/oldnews/figures/<label>/."""
+    """The three figures for one run, saved to data/oldnews/figures/<label>/. The first two come straight from the
+    stats module's horizon profile."""
     from oldnews import figures as F
 
     tests = result.get("tests")
-    data = F.Inputs(events=result["events"], nulls=result["nulls"], outcome=result["outcome"],
-                    labels=result["classified"], gap=result.get("gap"),
-                    profile=tests.get("profile") if isinstance(tests, dict) else None)
+    if not (isinstance(tests, dict) and "profile" in tests):
+        raise ValueError("figures need the stats module's horizon profile (results_<label>/profile.csv)")
+    data = F.Inputs(profile=tests["profile"], classified=result["classified"], outcome=F.primary_rows(result["outcome"]),
+                    nulls=result["nulls"])
     walk = None
-    pick = F.pick_walkthrough(data)
-    if pick is not None and NB is not None:
-        try:
-            walk = (pick, spot_path(NB, pick))
-        except Exception as e:  # noqa: BLE001 (a missing cache entry only costs the walkthrough figure)
-            log(f"walkthrough skipped: {type(e).__name__}: {str(e)[:120]}")
-    return F.make_all(data, OUT / "figures" / result["label"],
-                      title_suffix=f"{result['label']} · filings {result['start']}..{result['end']}", walk=walk,
-                      show=show)
+    if NB is not None:
+        for _, row in F.walkthrough_candidates(data.classified, data.outcome, data.nulls).head(5).iterrows():
+            try:                              # the next candidate in the same rule order if the cache cannot price this one
+                spot = spot_path(NB, row)
+            except Exception as e:  # noqa: BLE001 (a missing cache entry only costs this candidate)
+                log(f"walkthrough candidate {row['ticker']} {pd.Timestamp(row['t_0']).date()} skipped: "
+                    f"{type(e).__name__}: {str(e)[:100]}")
+                continue
+            if len(spot.dropna()) >= 10:
+                walk = (row, spot)
+                break
+    return F.make_all(data, OUT / "figures" / result["label"], result["label"],
+                      title_suffix=f"filings {result['start']}..{result['end']}", walk=walk,
+                      walk_note=WALK_NOTE, show=show)
+
+
+def figures_only(label: str, NB: dict | None = None, show: bool = False) -> dict[str, Path]:
+    """Draw the three figures from the tables a finished run wrote (data/oldnews/), computing nothing else.
+    The walkthrough reads the API cache offline; nothing is fetched."""
+    from oldnews import figures as F
+
+    check_label(label)
+    record = OUT / f"run_{label}.json"
+    w = WINDOWS.get(label)
+    if record.exists():
+        r = json.loads(record.read_text(encoding="utf-8"))
+        start, end = r["start"], r["end"]
+    elif w:
+        start, end = w.start, w.end
+    else:
+        raise FileNotFoundError(f"{record} not found: run the pipeline for {label!r} first")
+    if NB is None:
+        import nb
+        NB = nb.load()
+    w = window_rules(NB, start, end, label)       # the same date guards and switches as a full run
+    data = F.read_tables(label, OUT)
+    result = {"label": label, "start": start, "end": end, "classified": data.classified, "outcome": data.outcome,
+              "nulls": data.nulls, "tests": {"profile": data.profile}}
+    with sandbox(NB, False, w.clip_before):
+        return make_figures(result, NB, show)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run the old-news test on one window (cache only unless --allow-fetch).")
-    ap.add_argument("--label", required=True, help="discovery | dryrun | insample | holdout | oos | other")
+    ap.add_argument("--label", default=None, help="insample (the test) | holdout | oos; discovery and dryrun are retired")
     ap.add_argument("--start", default=None, help="first filing date (default: the label's window)")
     ap.add_argument("--end", default=None, help="last filing date (default: the label's window)")
-    ap.add_argument("--source", default=None, help="another label's prepared tables to cut, or 'api'")
+    ap.add_argument("--source", default=None, help="'api' to build the inputs through the API functions")
     ap.add_argument("--allow-fetch", action="store_true", help="let the notebook's cached API functions download")
     ap.add_argument("--no-figures", action="store_true")
+    ap.add_argument("--figures-only", action="store_true",
+                    help="draw the figures from the tables a finished run of this label wrote; compute nothing else")
+    ap.add_argument("--dry-run", action="store_true",
+                    help=f"quiet end-to-end check on {DRY_RUN_WINDOW[0]}..{DRY_RUN_WINDOW[1]} in a scratch folder (deleted)")
     args = ap.parse_args()
+    os.chdir(ROOT)                      # the notebook's cache and .env paths are relative to the repo root
+    if args.dry_run:
+        out = dry_run(args.start or DRY_RUN_WINDOW[0], args.end or DRY_RUN_WINDOW[1])
+        return 0 if out["error"] is None else 1
+    if not args.label:
+        ap.error("--label is required (insample, holdout or oos)")
+    check_label(args.label)
+    if args.figures_only:
+        for name, path in figures_only(args.label).items():
+            print(f"{name}: {path}")
+        return 0
     w = WINDOWS.get(args.label)
     start, end = args.start or (w and w.start), args.end or (w and w.end)
     if not (start and end):
         ap.error(f"--start and --end are required for label {args.label!r}")
-    os.chdir(ROOT)                      # the notebook's cache and .env paths are relative to the repo root
     report(run_oldnews(start, end, args.label, allow_fetch=args.allow_fetch, source=args.source,
                        figures=not args.no_figures))
     return 0

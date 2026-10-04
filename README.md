@@ -80,19 +80,20 @@ the judges run.
 
 ## Run it
 
-**One command** (the discovery window, from the cache):
+**One command** (the 2024 to 2025 test, from the cache; a human runs it once, unchanged):
 
 ```bash
-.venv/Scripts/python.exe src/oldnews/pipeline.py --label discovery      # Windows
-.venv/bin/python src/oldnews/pipeline.py --label discovery              # macOS / Linux
+.venv/Scripts/python.exe src/oldnews/pipeline.py --label insample      # Windows
+.venv/bin/python src/oldnews/pipeline.py --label insample              # macOS / Linux
 ```
 
-Other labels: `--label dryrun` (2023-07-01 to 2023-12-31, the judges' path on discovery data) and
-`--label insample` (the 2024 to 2025 confirmation, run once). `--start` and `--end` override the dates;
-`--allow-fetch` lets the notebook's cached API functions download what is missing.
+The test label is `insample`. `--start` and `--end` narrow the dates inside 2024 to 2025;
+`--allow-fetch` lets the notebook's cached API functions download what is missing. `--dry-run` is a quiet
+end-to-end check of the judges' path on 2024-07-01 to 2024-12-31: it prints only the event count, the wall time
+and whether each stage ran, writes to a temporary folder and deletes it.
 
-**In the notebook:** run all cells. The section *Old news, new news* runs discovery and the dry run; the
-confirmation is off until a human switches it on once (`OLDNEWS_RUN["insample"]`).
+**In the notebook:** run all cells. The section *Old news, new news* is off until a human switches the test on
+once (`OLDNEWS_RUN["insample"]`).
 
 **Sealed window (judges):** in section 2 set `HOLDOUT_START`, `HOLDOUT_END` and `RUN_HOLDOUT = True`, then run
 the notebook. The last cell runs our test on that window first, downloading what it needs, and prints the
@@ -102,8 +103,12 @@ qualify. Then come the trading record and the figures.
 **On a clean machine** (no cache), set `OLDNEWS_ALLOW_FETCH = True` in the notebook's *Old news, new news*
 setup cell. Downloads go one request at a time through the notebook's cached `api_get`, and the expected
 request count and runtime are printed before each download (`max_requests` refuses a run above a ceiling). A run
-prices its own rows plus at most 400 extra seeded ticker-dates for the market panel. The full discovery window
-took about 150,000 requests (about 7 hours) on our key.
+prices its own rows plus at most 400 extra seeded ticker-dates for the market panel (inside 2024 to 2025 for
+the test). Each priced ticker-date costs about 25 requests.
+
+**Numbers for the note and this README.** `.venv/Scripts/python.exe src/oldnews/report.py --label insample`
+writes `data/oldnews/README_numbers.md` from the results tables, so the note, this README and the notebook
+quote the same numbers; copy them from that file, never retype them.
 
 **Tests:** every module has a fast synthetic test (no data, no network), for example
 `.venv/Scripts/python.exe tests/test_oldnews_trade.py`.
@@ -114,16 +119,18 @@ took about 150,000 requests (about 7 hours) on our key.
   `load_api_key()`. Never paste it into a cell, a command or a file.
 - **No data in the repository.** `.massive_cache/` (raw API responses) and `data/` (everything derived from
   them) are git-ignored, because the data are licensed. The notebook is committed with its outputs cleared.
-- **One confirmation, through our pipeline only.** Our confirmation on 2024-2025 is run only through our
-  pipeline, once and unchanged. The starter's CFO-appointment example in the notebook, which also uses those
-  dates, is not part of our test.
-- **Frozen constants.** The z-score constants that standardise the math inputs are frozen from the discovery
-  window in `src/oldnews/zref_frozen.json` and applied unchanged to every window. The pipeline only reads that
-  file and stops with a clear message if it is missing.
+- **One test, through our pipeline only.** Our test on 2024-2025 (the plan's confirmation window) is run only
+  through our pipeline, once and unchanged. The starter's CFO-appointment example in the notebook, which also
+  uses those dates, is not part of our test.
+- **Frozen constants.** The z-score constants that standardise the math inputs are frozen once from the
+  in-sample ordinary days in `src/oldnews/zref_frozen_insample.json` and applied unchanged to every window. The
+  pipeline only reads that file and stops with a clear message if it is missing.
 - **Out-of-sample is off.** `RUN_OOS = False` in section 2. Switching it on is the one-time final test, done
   once by a human after everything is frozen; the pipeline refuses the out-of-sample window otherwise.
-- **Dates are guarded in code.** Discovery reads nothing on or after 2024-01-01; the confirmation reads
-  nothing on or after 2026-01-01; each module checks its own dates and stops if one is out of range.
+- **Dates are guarded in code.** Options history on our key covers only 2024 to 2026, so the test reads only
+  dates from 2024-01-01 to before 2026-01-01 and nothing inside the notebook's sealed placeholder; any other
+  window label is refused. The sealed window runs only with `RUN_HOLDOUT = True`, 2026 only with
+  `RUN_OOS = True`. Each module checks its own dates and stops if one is out of range.
 - **No lookahead.** Entry is the first close after the EDGAR acceptance time (a filing accepted after 15:30 ET,
   or the same margin before an early close, enters the next session). Every classification input is known by
   the last close before acceptance.
