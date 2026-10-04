@@ -113,6 +113,19 @@ quote the same numbers; copy them from that file, never retype them.
 **Tests:** every module has a fast synthetic test (no data, no network), for example
 `.venv/Scripts/python.exe tests/test_oldnews_trade.py`.
 
+**A voice for every run (optional, ElevenLabs).** Any pipeline run can narrate its own results. After a run,
+`extras/audio_brief.py` builds a two-minute spoken research brief from that run's own result files (the question,
+the result with its interval and p-value, the placebo, the trade net of costs, and the honest conclusion) and
+voices it with the ElevenLabs text-to-speech API. No one writes or edits the script, so a judge's sealed-window
+run gets a brief with its own numbers:
+
+    .venv/Scripts/python.exe extras/audio_brief.py --label insample            # our 2024-25 test
+    .venv/Scripts/python.exe extras/audio_brief.py --label holdout             # after the sealed-window run
+    .venv/Scripts/python.exe extras/audio_brief.py --label holdout --dry-run   # script text only, no key needed
+
+It needs `ELEVENLABS_API_KEY` in `.env` (never commit it) and writes `data/oldnews/audio/brief_<label>.mp3`.
+It is an add-on: it is not part of the judged notebook and changes no result. See `extras/README.md`.
+
 ## Data and rules
 
 - **No key in the repository.** The key lives in `.env` (git-ignored) and is read only by the notebook's
