@@ -548,15 +548,28 @@ def superset_disclosures(NB: dict, superset: Window | None):
         NB["fetch_disclosures"] = orig
 
 
-def events_step(fn: Callable, NB: dict, label: str, w: Window, superset: Window | None = None
-                ) -> tuple[pd.DataFrame, pd.DataFrame]:
+def full_text_mode(label: str, allow_fetch: bool) -> str | None:
+    """The word score's text source, as the committed test plan says (commit 34a11a4): the full EDGAR filing text.
+    insample reads the cached full texts; holdout fetches the missing ones (through events.SecFetcher, the polite
+    SEC client) when allow_fetch, else reads the cache. oos: None, because events.build reads full text for
+    insample and holdout only; that run falls back to the excerpt and says so in its counts."""
+    if label == "insample":
+        return "cache"
+    if label == "holdout":
+        return "fetch" if allow_fetch else "cache"
+    return None
+
+
+def events_step(fn: Callable, NB: dict, label: str, w: Window, superset: Window | None = None,
+                allow_fetch: bool = False) -> tuple[pd.DataFrame, pd.DataFrame]:
     """events.build for this run's own dates: `window=(first filing date, last filing date)`. The module owns the
     date guard and the switch each label needs (RUN_HOLDOUT for the sealed window, RUN_OOS for 2026), the
     acceptance-time sessions and the look-backs, and reads the ordinary days from data/oldnews/raw/. A sub-window
     gets exactly what the judges' window gets: its own dates, no history from before them. `superset` (the full
     2024-2025 window) lets a cache-only run answer its disclosure queries from the cached wider window."""
     with restoring(NB), superset_disclosures(NB, None if label == "holdout" else superset):
-        return _call(fn, label, NB=NB, window=(w.start, w.end), out_dir=OUT, playground=RAW)
+        return _call(fn, label, NB=NB, window=(w.start, w.end), out_dir=OUT, playground=RAW,
+                     full_text=full_text_mode(label, allow_fetch))
 
 
 def measurement_rows(events: pd.DataFrame, nulls: pd.DataFrame) -> pd.DataFrame:
@@ -675,7 +688,7 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
         stages["inputs"] = "ran"
         log(f"0 inputs: {len(raw_ev)} TOP_100 filings and {len(raw_nu)} ordinary days, from {origin}")
 
-        ev, nu = events_step(steps.events, NB, label, w, superset)
+        ev, nu = events_step(steps.events, NB, label, w, superset, allow_fetch)
         check_dates(ev, w, "event", NB)
         check_dates(nu, w, "ordinary-day", NB)
         result.update(events=ev, nulls=nu)
