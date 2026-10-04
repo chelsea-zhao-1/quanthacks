@@ -1,89 +1,99 @@
-# Old news or surprise news: implied volatility after late executive 8-Ks
+# Old news or surprise news after late executive 8-Ks
 
 ## 1. Hypothesis
 
-We study Item 5.02 filings at the 100 largest US companies: executive and director departures and appointments. Most are filed days after the event. We believe they are of two kinds. *Old news*: the market heard first, so the stock moved unusually between event and filing, or the filing says the news was public. *Surprise news*: the stock was quiet and the filing shows no earlier disclosure.
+Item 5.02 filings at the 100 largest US companies (executive and director departures and appointments) are mostly filed days after the event. We believed they come in two kinds: *old news*, which the market heard first (the stock moved unusually between event and filing, or the filing says the news was public), and *surprise news* (no sign of either). Either way the filing is a dated headline that draws option demand and lifts implied volatility, and unlike earnings nothing follows to bring it down. After surprise news that premium pays for a move to come; after old news, for one already made. We predicted realised volatility would fall short of implied by more after old news (H1: 10 sessions, 1-month options), so a cash-secured put sold on old news would beat the same put elsewhere (H2).
 
-Either way we believe the filing is a new, dated headline that draws option demand and lifts implied volatility, and unlike earnings nothing follows to bring it back down. After surprise news that premium pays for a move to come; after old news, for one already made. We expect realised volatility to fall short of implied by more after old news (H1: 10 sessions, 1-month options, prediction negative), and trade it by selling cash-secured puts on old-news filings (H2).
-
-Rules were committed on 2026-10-03; every amendment (`docs/decision_log.md`) preceded any 2024-25 outcome.
+**Finding: the hypothesis is not supported in 2024-25.** Rules were committed on 2026-10-03; every amendment (`docs/decision_log.md`) preceded any 2024-25 outcome. An earlier exploratory run on 2022-23 was discarded because the challenge allows only 2024-25 data.
 
 ## 2. Method
 
-Window: filings from 2024-01-01 to 2025-12-31; pooled is primary, each year a check. Spot is from ATM put-call parity.
+Filings from 2024-01-01 to 2025-12-31, pooled, each year a check; spot from ATM put-call parity. **Events:** late if the cover-page event date is at least one business day before acceptance; dropped if an earnings filing for the ticker lies within ±5 sessions. Entry `t_0` is the first close after EDGAR acceptance (next session if after 15:30 ET); `t_pre` is the last close before it. The gap runs from the session before the event date to `t_pre`.
 
-**Events.** One row per accession. Late: cover-page event date at least one business day before acceptance. Dropped: filings with an earnings filing for the ticker within ±5 sessions ({{n_earn_dropped}}; tags are incomplete). Entry `t_0` is the first close after EDGAR acceptance, the next session if after 15:30 ET; `t_pre` is the last close before it. The gap runs from the last session before the event date to `t_pre`.
+**Classification:** S = M + T, old news if S ≥ 1. M averages three gap inputs standardised with constants frozen from 1,245 ordinary days: gap move |r_gap − r_mkt| / (σ√n) (r_mkt the TOP_100 median, σ gap-start implied volatility), implied-volatility change, and log option volume over its prior 5-session average. T counts full-text cues: a dated prior announcement, "previously announced/disclosed/reported", an earlier people-news 8-K by the ticker within 30 days.
 
-**Classification.** S = M + T; old news if S ≥ 1. M averages three inputs standardised with constants frozen from 2024-25 ordinary days (gap inputs only; `zref_frozen_insample.json`): gap move |r_gap − r_mkt| / (σ√n), r_mkt the TOP_100 median return, σ the gap-start implied volatility; implied-volatility change over the gap; log gap option volume over its prior 5-session average. T counts cues in the full EDGAR text: a dated prior announcement, "previously announced/disclosed/reported", an earlier people-news 8-K by the ticker within 30 days.
+**Outcome:** Y_h = log(RV_h / IV_0), parity-spot realised volatility from `t_0` to h over 1-month ATM implied volatility at `t_0`, minus its mean on matched ordinary days (same ticker, ±60 sessions, over 5 sessions from any 8-K, same gap length).
 
-**Outcome.** Y_h = log(RV_h / IV_0): realised volatility of parity-spot returns from `t_0` to h over 1-month ATM implied volatility at `t_0`, minus its mean on two matched ordinary days (same ticker, ±60 sessions, over 5 sessions from any 8-K, same gap length; seed 20261003).
-
-**Tests.** H1: old minus surprise, one-sided label permutation (10,000 draws, seed 20261003), 5% level. H1b: old events against ordinary days with a gap move at least as large. P: H1 on late governance and payout filings, expecting no difference. H2: the put below, net of costs, against ordinary days and all late filings. Every fixed horizon, expiry included, gets a bootstrap 95% interval and Benjamini-Hochberg q-value. The ledger holds all {{n_variants}} variants.
+**Tests:** H1, old minus surprise, one-sided label permutation (10,000 draws, seed 20261003); H1b, old events against ordinary days with gap moves at least as large; P, H1 on late governance and payout filings; H2, the put net of costs against ordinary days and all late filings. Every horizon gets a bootstrap 95% interval and Benjamini-Hochberg q. The ledger holds 337 variants in 6 runs.
 
 ## 3. Result
 
-{{n_late}} late filings remain: {{n_old}} old news, {{n_surprise}} surprise. H1: {{H1_diff}} (95% CI {{H1_lo}} to {{H1_hi}}), p = {{H1_p}}, {{H1_verdict}}; 2024 {{H1_2024}}, 2025 {{H1_2025}}. H1b: {{H1b_diff}} ({{H1b_lo}} to {{H1b_hi}}). Placebo: {{P_diff}} ({{P_lo}} to {{P_hi}}), p = {{P_p}}.
+Of 410 filings, 286 were late, 271 passed the earnings exclusion and 146 had usable outcomes: 45 old, 101 surprise, 59 tickers.
 
-{{FIG_fade_curve}}
+H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0.2621), one-sided p = 0.8615; 2024 +0.0263, 2025 +0.1636; trimmed +0.0811. H1b has the predicted sign without significance: −0.0364 (−0.1435 to +0.0708), p = 0.2546. The placebo shows no difference: +0.0990 (−0.1092 to +0.3081), two-sided p = 0.4013. No horizon survives the correction.
 
-*Figure 1. Mean Y_h by horizon, old versus surprise.*
+![Figure 1](../data/oldnews/figures/insample/fade_curve.png)
 
-| h | Old − surprise (95% CI) | BH q | 2026 |
-|---|---|---|---|
-| 1 | {{d_1}} ({{ci_1}}) | {{q_1}} | {{oos_1}} |
-| 2 | {{d_2}} ({{ci_2}}) | {{q_2}} | {{oos_2}} |
-| 3 | {{d_3}} ({{ci_3}}) | {{q_3}} | {{oos_3}} |
-| 5 | {{d_5}} ({{ci_5}}) | {{q_5}} | {{oos_5}} |
-| 10 | {{d_10}} ({{ci_10}}) | {{q_10}} | {{oos_10}} |
-| 21 | {{d_21}} ({{ci_21}}) | {{q_21}} | {{oos_21}} |
-| 42 | {{d_42}} ({{ci_42}}) | {{q_42}} | {{oos_42}} |
-| 63 | {{d_63}} ({{ci_63}}) | {{q_63}} | {{oos_63}} |
-| expiry | {{d_exp}} ({{ci_exp}}) | {{q_exp}} | {{oos_exp}} |
+*Figure 1. Mean Y_h, old versus surprise, 95% bands.*
 
-*Table 1. H1 by horizon, 1-month bucket. 2026 run once, after the freeze.*
+| h | n | Old − surprise (95% CI) | BH q | 2026 |
+|---|---|---|---|---|
+| 1 | 132 | −0.1844 (−0.7212, +0.3464) | 0.9501 | {{oos_1}} |
+| 2 | 146 | +0.1400 (−0.1968, +0.4901) | 0.9501 | {{oos_2}} |
+| 3 | 147 | +0.1433 (−0.1466, +0.4471) | 0.9501 | {{oos_3}} |
+| 5 | 153 | +0.1913 (−0.0024, +0.3914) | 0.9501 | {{oos_5}} |
+| 10 | 146 | +0.0966 (−0.0685, +0.2621) | 0.9501 | {{oos_10}} |
+| 21 | 33 | −0.0579 (−0.4224, +0.2548) | 0.9501 | {{oos_21}} |
+| 42 | 0 | n/a | n/a | {{oos_42}} |
+| 63 | 0 | n/a | n/a | {{oos_63}} |
+| expiry | 141 | −0.0131 (−0.1597, +0.1354) | 0.9501 | {{oos_exp}} |
 
-**Sensitivity.** H1 re-run one choice at a time (weights, cutoff, expiry bucket, strike, entry session, category set, text source): {{sens_n_neg}} of {{sens_n}} keep the negative sign; effects span {{sens_min}} to {{sens_max}}. Full grid in the notebook.
+*Table 1. H1 by horizon, 1-month bucket (42 and 63 lie past expiry). 2026: one-time run, pending.*
+
+**Sensitivity** (23 one-at-a-time settings: weights, cutoff, bucket, strike, category, text source; grid in the notebook): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. `t_0 + 1` was not computed.
+
+**Exploratory diagnostics** (after the result): minimum detectable effect {{diag_mde}}; separation of pre-entry inputs {{diag_sep}}; trade mean without its most influential trade {{diag_influence}}.
 
 ## 4. What would break it
 
-- **Classifier.** The split may proxy for large moves in volatile names. H1b and P test this: a placebo gap as large as H1 would mean late filings, not old news.
-- **Private event date.** The cover-page date is the company's own, perhaps a board date, not when the market heard; it mislabels events and should shrink the difference.
-- **Selection.** Firms choose what to file late and the universe is today's top 100; we cannot sign either effect.
-- **Constants.** A 2024 event is standardised partly with later gap inputs. No outcome enters, but a live trader could not have had them.
-- **Thin options.** The 1-month expiry is often a weekly whose ATM pair misses sessions. Gap-start marks up to 3 sessions old are allowed ({{n_stale}} filings), closes are not quotes and parity ignores dividends.
-- **Small sample.** {{n_old}} old-news events, at most five positions; under 30 events is labelled descriptive. One crash can dominate a short-put record.
-- **Sealed window.** We predict H1's sign holds without significance in a 3 to 8 month window, larger when market-wide implied volatility is high.
+- **Classifier.** It may not measure prior knowledge: H1b has the predicted sign; the old-versus-surprise split does not.
+- **Private event date.** The cover-page date is the company's own, not when the market heard; mislabels shrink any difference.
+- **Selection.** Firms choose what to file late; the universe is today's top 100.
+- **Constants.** 2024 events are standardised partly with later gap inputs (never outcomes).
+- **Thin options.** Weekly 1-month expiries miss sessions; 16 gap-start marks are 1 to 3 sessions old; closes are not quotes; parity ignores dividends.
+- **Small sample.** With 45 old-news events, effects below {{diag_mde}} go undetected.
+- **Sealed window.** We predict no detectable old-versus-surprise difference; under 30 events is labelled descriptive.
 
 ## 5. How to trade it
 
-On each late people-news filing scored old news, sell a 1-month put 3% below spot at `t_0` and close after 10 sessions. At most five positions, in order of entry; collateral is strike × 100. Costs: the larger of 5% of premium or $0.05 a share, each way. Size is capped at 10% of the put's entry-day volume: median {{cap_median}} of collateral per trade, a book near {{cap_book}}.
+We would not trade it. As tested: sell a 1-month put 3% below spot at `t_0` on each old-news filing and close after 10 sessions; at most five positions; collateral strike × 100; costs the larger of 5% of premium or $0.05 a share, each way.
 
-Net of costs: {{n_trades}} trades, {{ret_total}}% total ({{ret_ann}}% annualised), hit rate {{hit}}%, maximum drawdown {{maxdd}}%; {{ret_total_2x}}% at double costs. H2: {{H2_null_diff}} points per trade against ordinary days ({{H2_null_lo}} to {{H2_null_hi}}), {{H2_all_diff}} against all late filings. Worst five: {{worst5}}.
+The 49-trade book returns +1.19% (+0.60% annualised), hit rate 67.3%, marked drawdown −4.68%; −0.84% at double costs. The same put on ordinary days returns +2.25% and +1.34% (two draws). H2: −0.09 points per trade against ordinary days (−0.86 to +0.64), −0.02 against all late filings (−0.51 to +0.44). The mean trade, +0.12%, is small against one loss (C, −8.17%). Capacity at 10% of entry-day put volume: median $73,500 per trade, a book near $367,500; 8 of 49 trades allow no contract.
 
 ---
 
-## Placeholders
+## Placeholders and sources
 
-Delete this section before submission. Every value comes from a run of the committed rules on 2024-25; `<insample>` is `data/oldnews/results_insample/`, `<trade>` is `data/oldnews/trade_insample/`. Nothing here is filled until the architect says the inputs are final.
+Delete this section before submission. `RN` = `data/oldnews/README_numbers.md` (generated 2026-10-03 22:20, run `20261003T221852-bc564b`, git `5bbfd9d49e`); `RS` = `data/oldnews/results_insample/summary.md`; `TS` = `data/oldnews/trade_insample/summary.md`.
 
-| Placeholder | File | Column or source |
-|---|---|---|
-| `{{n_late}}`, `{{n_earn_dropped}}` | `<insample>/counts.csv` | column `people`; step "outcome usable ..." for `n_late`; the drop from "late" to "no earnings filing within 5 sessions" for `n_earn_dropped` |
-| `{{n_old}}`, `{{n_surprise}}` | `<insample>/h1.csv` | `n_old`, `n_comp` |
-| `{{n_variants}}` | `data/oldnews/ledger.csv` | row count (`ledger.variant_count`) |
-| `{{H1_diff}}`, `{{H1_lo}}`, `{{H1_hi}}`, `{{H1_p}}` | `<insample>/h1.csv` | `effect`, `ci_lo`, `ci_hi`, `p_one_sided` |
-| `{{H1_verdict}}` | `<insample>/h1.csv` | "confirmed" if `effect` < 0 and `p_one_sided` < 0.05, else "not confirmed" (write what the numbers say) |
-| `{{H1_2024}}`, `{{H1_2025}}` | `<insample>/by_year.csv` | rows `test` = H1, `period` = 2024 / 2025; `effect` with CI and p |
-| `{{H1b_diff}}`, `{{H1b_lo}}`, `{{H1b_hi}}` | `<insample>/h1b.csv` | `effect`, `ci_lo`, `ci_hi` |
-| `{{P_diff}}`, `{{P_lo}}`, `{{P_hi}}`, `{{P_p}}` | `<insample>/placebo.csv` | `effect`, `ci_lo`, `ci_hi`, `p_two_sided` |
-| `{{FIG_fade_curve}}` | `data/oldnews/figures/fade_curve.png` | image from `src/oldnews/figures.py` |
-| `{{d_h}}`, `{{ci_h}}`, `{{q_h}}` for h = 1, 2, 3, 5, 10, 21, 42, 63, exp | `<insample>/profile.csv` | rows `test` = H1, `horizon` = h; `effect`, `ci_lo` to `ci_hi`, `q_bh` |
-| `{{oos_h}}` for the same h | `data/oldnews/results_oos/profile.csv` | same columns. Filled only by a human after the one-time 2026 run. If it is not run, delete the column and its caption sentence and say 2026 was not run |
-| `{{sens_n_neg}}`, `{{sens_n}}`, `{{sens_min}}`, `{{sens_max}}` | `<insample>/sensitivity.csv` | count of rows with `effect` < 0; row count; min and max `effect` |
-| `{{n_stale}}` | `<insample>/coverage.csv` | row "gap-start mark stale (1 to 3 sessions old)", column `people` |
-| `{{cap_median}}`, `{{cap_book}}` | `<trade>/capacity.csv` | `trade.capacity_summary`: `median_collateral_usd`, `book_at_median_usd` |
-| `{{n_trades}}`, `{{ret_total}}`, `{{ret_ann}}`, `{{hit}}`, `{{maxdd}}` | `<trade>/summary.csv` | `book` = old, `horizon` = 10, `cost` = 1x: `n_trades`, `total_return_pct`, `annualised_pct`, `hit_rate_pct`, `max_dd_mtm_pct` |
-| `{{ret_total_2x}}` | `<trade>/summary.csv` | same row with `cost` = 2x, `total_return_pct` |
-| `{{H2_null_diff}}`, `{{H2_null_lo}}`, `{{H2_null_hi}}` | `<trade>/h2.csv` | `comparison` = old_minus_null, `horizon` = 10, `cost` = 1x: `diff_pct`, `ci_lo_pct`, `ci_hi_pct` |
-| `{{H2_all_diff}}` | `<trade>/h2.csv` | `comparison` = old_minus_all_late, `horizon` = 10, `cost` = 1x: `diff_pct` |
-| `{{worst5}}` | `<trade>/worst.csv` | `ticker`, `pnl_pct` of the five rows |
+**Still open**
+
+| Placeholder | Source |
+|---|---|
+| `{{oos_h}}` (h = 1, 2, 3, 5, 10, 21, 42, 63, exp) | `data/oldnews/results_oos/profile.csv`, rows `test` = H1: `effect` (`ci_lo`, `ci_hi`). Only after a human runs the one-time 2026 test; otherwise delete the column and say 2026 was not run |
+| `{{diag_mde}}` | diagnostics agent: minimum detectable H1 effect (power), 2024-25 |
+| `{{diag_sep}}` | diagnostics agent: whether old and surprise differ on the pre-entry inputs |
+| `{{diag_influence}}` | diagnostics agent: old-news mean trade at h = 10, 1x, without the most influential trade. Needed to support "the mean depends on one trade"; until filled, only the C loss against the mean is stated |
+
+**Filled (2024-25 only)**
+
+| Value in the note | Source |
+|---|---|
+| 1,245 ordinary days (constants) | RN §1 and §7 |
+| 337 variants in 6 runs | RN §8 |
+| 410, 286, 271, 146, 45, 101 (sample) | RN §2 (`people` column); RS "Counts" |
+| 59 tickers; H1 +0.0966, −0.0685, +0.2621, p 0.8615; trimmed +0.0811 | RN §3 (H1 row) |
+| 2024 +0.0263, 2025 +0.1636 | RS "By year" (`results_insample/by_year.csv`) |
+| H1b −0.0364, −0.1435, +0.0708, p 0.2546, n 49 | RN §3 (H1b row) |
+| P +0.0990, −0.1092, +0.3081, two-sided p 0.4013 | RN §3 (P row) |
+| Table 1: n, effect, 95% CI, q per horizon | RN §4, H1 table (`results_insample/profile.csv`) |
+| Figure 1 | `data/oldnews/figures/insample/fade_curve.png` |
+| 23 settings, 7 negative, −0.1150 to +0.1536, smallest p 0.1999 | RN §5 (23 rows counted; negatives: math_only ×3, math_heavy ×3, excerpt equal) |
+| `t_0 + 1` not computed | RS "Not computed here" |
+| 16 stale gap-start marks | RS "Coverage" (`results_insample/coverage.csv`, `people`) |
+| +1.19%, +0.60%, 67.3%, −4.68%, −0.84% (old book, h = 10) | RN §6 "Books at h = 10" |
+| +2.25%, +1.34% (null_r1, null_r2, 1x) | RN §6 "Books at h = 10" |
+| H2 −0.09 (−0.86, +0.64); −0.02 (−0.51, +0.44) | RN §6 H2 table (1x rows) |
+| mean trade +0.12%; C −8.17% | RN §6 books table and "Five worst" |
+| $73,500; $367,500; 8 of 49 | RN §6 capacity table |
+| 45 old-news events (small sample) | RN §3 |
