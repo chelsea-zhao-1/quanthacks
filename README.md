@@ -128,9 +128,9 @@ quote the same numbers; copy them from that file, never retype them.
 - **Out-of-sample is off.** `RUN_OOS = False` in section 2. The 2026 section is implemented and tested but
   shipped off, as the notebook's signed warning requires, and no 2026 result is reported; the
   2024-2025 test was itself one-shot, and the judges' sealed-window rerun is the true out-of-sample check.
-- **Dates are guarded in code.** Options history on our key covers only 2024 to 2026, so the test reads only
-  dates from 2024-01-01 to before 2026-01-01 and nothing inside the notebook's sealed placeholder; any other
-  window label is refused. The sealed window runs only with `RUN_HOLDOUT = True`. Each module checks its own dates and stops if one is out of range.
+- **Dates are guarded in code.** Massive asked contestants to use only 2024-2025 data (earlier history exists
+  but is off limits; the sealed placeholder is 2023-06-01 to 2023-08-31), so the test reads only dates from
+  2024-01-01 to before 2026-01-01; any other window label is refused. The sealed window runs only with `RUN_HOLDOUT = True`. Each module checks its own dates and stops if one is out of range.
 - **No lookahead.** Entry is the first close after the EDGAR acceptance time (a filing accepted after 15:30 ET,
   or the same margin before an early close, enters the next session). Every classification input is known by
   the last close before acceptance.

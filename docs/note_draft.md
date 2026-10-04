@@ -1,67 +1,58 @@
 # Old news or surprise news after late executive 8-Ks
 
+Sarah Spellman, Lalitha Kantam, Chelsea Zhao, Shayaan Nesargi · University of Florida · Gator Quant Hacks 2026 (Systematic Trading, Massive Trade the 8-K)
+
 ## 1. Hypothesis
 
-**This is a null result: a specific mechanism, rules fixed in advance, and 2024-25 data that do not support it.** Executive and director departures and appointments (Item 5.02) at the 100 largest US companies are mostly filed days after the event. We believed they come in two kinds: *old news*, which the market heard first (the stock moved unusually between event and filing, or the filing says the news was public), and *surprise news* (no sign of either). Either way the filing is a dated headline that draws option demand and lifts implied volatility, and unlike earnings nothing follows to bring it down. After surprise news that premium pays for a move to come; after old news, for one already made. We predicted realised volatility would fall short of implied by more after old news (H1: 10 sessions, 1-month options), so a cash-secured put sold on old news would beat the same put elsewhere (H2).
+**A null result: a specific mechanism, rules fixed in advance, and 2024-25 data that do not support it.** Executive and director changes (Item 5.02) at the 100 largest US firms are mostly filed days late. We believed they come in two kinds: *old news*, which the market heard first (an unusual stock move between event and filing, or the filing says the news was public), and *surprise news* (neither). Either way the filing is a dated headline that draws option demand and lifts implied volatility; unlike earnings, nothing follows to bring it down. After surprise news that premium pays for a move to come; after old news, for one already made. We predicted realised volatility would fall short of implied by more after old news (H1: 10 sessions, 1-month options), so a cash-secured put sold on old news would beat the same put elsewhere (H2). The other side is the option buyer the headline draws; our put seller supplies that demand. Such a premium could persist because it is small, event-specific, short-lived and hard to separate from ordinary volatility risk; our data did not find it.
 
-Rules were committed on 2026-10-03; every amendment (`docs/decision_log.md`) preceded any 2024-25 outcome. An earlier exploratory run on 2022-23 was discarded because the challenge allows only 2024-25 data.
+Every rule, the frozen constants and the test plan were committed before any 2024-25 outcome was seen (hypothesis 07d3ddb, 2026-10-03 19:28 ET; test plan 79c001d, 19:49; constants 5bbfd9d, 22:18; first 2024-25 result 4ba177e, 22:20; amendments in `docs/decision_log.md`), so 2024-25 is a single pre-registered test with no tuning period. The notebook's 2026 out-of-sample section ships off, as its signed organiser warning requires, so no 2026 result exists; the judges' sealed-window rerun is the replication.
 
 ## 2. Method
 
-Filings from 2024-01-01 to 2025-12-31, pooled, each year a check; spot from ATM put-call parity. **Events:** late if the cover-page event date is at least one business day before acceptance; dropped if an earnings filing for the ticker lies within ±5 sessions. Entry `t_0` is the first close after EDGAR acceptance (next session if after 15:30 ET); `t_pre` is the last close before it. The gap runs from the session before the event date to `t_pre`.
+2024-01-01 to 2025-12-31, pooled; each year a check. **Events:** late if the cover-page event date is at least one business day before acceptance; dropped if the ticker has an earnings filing within ±5 sessions. Entry `t_0` is the first close after EDGAR acceptance (next session if after 15:30 ET); `t_pre` is the last close before it. The gap runs from the session before the event to `t_pre`.
 
-**Classification:** S = M + T, old news if S ≥ 1. M averages three gap inputs standardised with constants frozen from 1,245 ordinary days. The inputs are the gap move |r_gap − r_mkt| / (σ√n) (r_mkt the TOP_100 median), the implied-volatility change, and log option volume over its prior 5-session average. T counts full-text cues: a dated prior announcement, "previously announced/disclosed/reported", an earlier people-news 8-K by the ticker within 30 days.
+**Classification:** S = M + T; old news if S ≥ 1. M averages three gap inputs standardised with constants frozen from 1,245 ordinary days: the gap move |r_gap − r_mkt| / (σ√n) (r_mkt the TOP_100 median), the implied-volatility change, and log option volume over its prior 5-session average. T counts full-text cues: a dated prior announcement, "previously announced/disclosed/reported", an earlier people-news 8-K within 30 days.
 
-**Outcome:** Y_h = log(RV_h / IV_0), parity-spot realised volatility from `t_0` to h over 1-month ATM implied volatility at `t_0`, minus its mean on matched ordinary days (same ticker, ±60 sessions, over 5 sessions from any 8-K, same gap length).
+**Outcome:** Y_h = log(RV_h / IV_0): realised volatility from `t_0` to h over 1-month ATM implied volatility at `t_0`, minus its mean on matched ordinary days (same ticker, ±60 sessions, over 5 sessions from any 8-K, same gap length).
 
-**Tests:** H1, old minus surprise, one-sided label permutation (10,000 draws, seed 20261003); H1b, old events against ordinary days with gap moves at least as large; P, H1 on late governance and payout filings; H2, the put net of costs against ordinary days. Every horizon gets a bootstrap 95% interval and Benjamini-Hochberg q. Every variant is logged (§9).
+**Tests:** H1, old minus surprise, one-sided label permutation (10,000 draws, seed 20261003); H1b, old events against ordinary days with gap moves as large; P (placebo), H1 on late governance and payout filings; H2, the put net of costs against ordinary days. Every horizon gets a bootstrap 95% interval and a Benjamini-Hochberg q; every variant is logged (§9).
+
+![Figure 1](../data/oldnews/figures/insample/fig_method.png)
+
+*Figure 1. Method: from filing to label, outcome and trade.*
 
 ## 3. Result
 
 Of 410 filings, 286 were late, 271 clear of earnings and 146 usable: 45 old, 101 surprise.
 
-H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0.2621), one-sided p = 0.8615; 2024 +0.0263, 2025 +0.1636. H1b has the predicted sign without significance: −0.0364 (−0.1435 to +0.0708), p = 0.2546. The placebo shows no difference: +0.0990 (−0.1092 to +0.3081), two-sided p = 0.4013. No horizon survives the correction. The pre-committed 5% trimmed difference is +0.0811. An independent reimplementation reproduced H1 and found no lookahead in entry timing.
+H1 has the wrong sign and is not significant: +0.0966 (95% CI −0.0685 to +0.2621), one-sided p = 0.8615; 2024 +0.0263, 2025 +0.1636. H1b has the predicted sign, not significant: −0.0364 (−0.1435 to +0.0708), p = 0.2546. Placebo: +0.0990 (−0.1092 to +0.3081), two-sided p = 0.4013. No horizon survives the correction (Figure 2; Table A1). The committed 5% trimmed difference is +0.0811. An independent reimplementation reproduced H1 and found no lookahead in entry timing.
 
-![Figure 1](../data/oldnews/figures/insample/fade_curve.png)
+![Figure 2](../data/oldnews/figures/insample/fig_results.png)
 
-*Figure 1. Mean Y_h, old versus surprise.*
+*Figure 2. Mean Y_h by group; old minus surprise by horizon with 95% intervals; the placebo difference.*
 
-| h | Old − surprise (95% CI) | BH q |
-|---|---|---|
-| 1 | −0.1844 (−0.7212, +0.3464) | 0.9501 |
-| 2 | +0.1400 (−0.1968, +0.4901) | 0.9501 |
-| 3 | +0.1433 (−0.1466, +0.4471) | 0.9501 |
-| 5 | +0.1913 (−0.0024, +0.3914) | 0.9501 |
-| 10 | +0.0966 (−0.0685, +0.2621) | 0.9501 |
-| 21 | −0.0579 (−0.4224, +0.2548) | 0.9501 |
-| 42 | n/a | n/a |
-| 63 | n/a | n/a |
-| expiry | −0.0131 (−0.1597, +0.1354) | 0.9501 |
+**Sensitivity** (23 one-at-a-time changes to weights, cutoff, bucket, strike, category, text source, entry session): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. Entry one session later: +0.0388 (−0.1354 to +0.2129), p = 0.6681 (47 old, 86 surprise).
 
-*Table 1. H1 by horizon, 1-month bucket; 33 events at 21 sessions, none at 42 or 63 (past expiry).*
-
-**Sensitivity** (23 settings changed one at a time from the primary: weights, cutoff, bucket, strike, category, text source, entry session; grid in the notebook): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. Entering one session later gives +0.0388 (−0.1354 to +0.2129), p = 0.6681 (47 old, 86 surprise).
-
-**Exploratory diagnostics** (after the result): the minimum detectable effect is 0.2109 (80% power); the null rules out a true effect below −0.0429 but not a small negative one. Leaving out each of 59 tickers never flips the sign (+0.0553 to +0.1173).
+**Exploratory diagnostics** (after the result): minimum detectable effect 0.2109 (80% power); effects below −0.0429 are ruled out, small negative ones are not. Dropping any one of 59 tickers never flips the sign (+0.0553 to +0.1173).
 
 ## 4. What would break it
 
-- **Classifier.** Math and word labels barely agree (Cohen's kappa 0.097), and 35 of 45 old calls are events the math alone calls surprise.
-- **Event date and selection.** The cover-page date is the company's, not when the market heard; late filing is a choice; the universe is today's top 100.
-- **Information after entry.** Constants use later 2024-25 gap inputs (never outcomes); the earnings exclusion looks up to 5 sessions past entry, at scheduled dates whose filings come later.
-- **Thin options.** Weekly 1-month expiries miss sessions; 16 gap-start marks are 1 to 3 sessions old; parity ignores dividends.
-- **Sealed window.** We predict no detectable old-versus-surprise difference. If the judges choose a window with thin option coverage, the run reports a descriptive result (fewer than 30 qualifying events) rather than failing.
+- **Classifier.** Math and word labels barely agree (Cohen's kappa 0.097); 35 of 45 old calls are events the math alone calls surprise.
+- **Event date and selection.** The cover-page date is the company's, not the market's; late filing is a choice; the universe is today's top 100.
+- **Information after entry.** Constants use later 2024-25 gap inputs (never outcomes); the earnings exclusion looks up to 5 sessions past entry, at dates scheduled in advance.
+- **Thin options.** Weekly 1-month expiries miss sessions; 16 gap-start marks are 1 to 3 sessions old.
+- **Sealed window.** We predict no detectable difference; below 30 qualifying events the run reports a descriptive result.
 
 ## 5. How to trade it
 
-We would not trade it. As tested: sell a 1-month put 3% below spot at `t_0` on each old-news filing and close after 10 sessions; at most five positions; collateral strike × 100; costs the larger of 5% of premium or $0.05 a share, each way.
+We would not trade it. As tested: sell a 1-month put 3% below spot at `t_0`, the first close after EDGAR acceptance (for the 251 trade-eligible filings, a median 2 sessions after the event, IQR 1 to 3; 64% were accepted at or after 15:30 ET and enter the next session), on each old-news filing; close after 10 sessions; at most five positions; collateral strike × 100. The committed cost rule is the larger of 5% of premium or $0.05 a share, each way (median round trip at h = 10: 16.4 bps of collateral and 1,031 bps of premium at 1x; 32.8 and 2,062 at 2x), in line with typical quoted half-spreads on liquid large-cap options; without quotes this is an assumption, so every result is repeated at 2x.
 
-The 49-trade book returns +1.19%, marked drawdown −4.68%; −0.84% at double costs. H2: −0.09 points per trade against ordinary days (−0.86 to +0.64). The mean trade is +0.121%, +0.294% without its largest loss (C, −8.17%), and the top three trades exceed the whole P&L (167%). Capacity at 10% of entry-day put volume: median $73,500 collateral per trade.
-
+The 49-trade book returns +1.19% (marked drawdown −4.68%), −0.84% at double costs. H2: −0.09 points per trade against ordinary days (−0.86 to +0.64). The mean trade is +0.121%, +0.294% without its largest loss (C, −8.17%), and the top three trades exceed the whole P&L (167%).
 
 ## 6. Performance evidence
 
-The book below is the strategy as committed: old-news filings only, 10-session hold, 2024-25. It is shown because the track asks for it, not because we recommend it; H2 already finds it indistinguishable from the same put on ordinary days. Daily returns come from the marked equity curve, idle days count as zero, the risk-free rate is zero and no interest is credited on collateral.
+Table 1 is the committed strategy, shown because the track asks; H2 finds no difference from ordinary days. Daily returns come from the marked equity curve; idle days count as zero; no risk-free rate or collateral interest. No out-of-sample result exists (§1).
 
 | Old-news book, h = 10 | 2024-25, 1x | 2024-25, 2x |
 |---|---|---|
@@ -76,49 +67,97 @@ The book below is the strategy as committed: old-news filings only, 10-session h
 | Hit rate, % | 67.35 | 63.27 |
 | Turnover, collateral per year / book | 5.01 | 5.01 |
 
-*Table 2. The old-news book in 2024-25, at 1x and 2x costs.*
+*Table 1. The old-news book in 2024-25, at 1x and 2x costs.*
 
-**Out of sample.** The 2024-25 test was itself a one-shot test: the hypothesis, test plan and frozen constants were committed to Git before any 2024-25 outcome was seen. The 2026 out-of-sample section is implemented and tested but shipped off, as the notebook's signed warning requires; no 2026 result was computed or is reported. The judges' sealed-window rerun is the true out-of-sample check, and the notebook runs it with only a start and an end date.
+By year the book made +1.52% in 2024 and −0.33% in 2025 at 1x (+0.49% and −1.33% at 2x; Figure A2). The same put has a higher 1x Sharpe on matched ordinary days (0.51 and 0.34 in two draws) and on all late people-news filings (0.62).
 
-By year, the book made +1.52% in 2024 and −0.33% in 2025 at 1x (+0.49% and −1.33% at 2x). The same put on matched ordinary days has a higher Sharpe, 0.51 and 0.34 in the two draws, and on all late people-news filings 0.62, all at 1x. Selecting old-news filings adds nothing measurable (H2).
+![Figure 3](../data/oldnews/figures/insample/equity_curve.png)
 
-![Figure 2](../data/oldnews/figures/insample/equity_curve.png)
+*Figure 3. Cumulative P&L and drawdown of the old-news book at 1x and 2x costs, against the same put on matched ordinary days and on all late people-news filings.*
 
-*Figure 2. Cumulative P&L and drawdown of the old-news book at 1x and 2x costs, against the same put on matched ordinary days and on all late people-news filings.*
+Book returns at other horizons (1x): −4.91% at 1 session, −2.03% at 5, +2.52% held to expiry. Per trade:
 
-At other horizons the old-news book loses: −4.91% at 1 session, −2.03% at 5, and gains +2.52% when held to expiry (1x).
+| h | n | Mean net P&L per trade, 1x (%) | 95% CI (%) | 2x mean (%) |
+|---|---|---|---|---|
+| 1 | 49 | −0.50 | −0.97, −0.17 | −0.72 |
+| 2 | 51 | −0.36 | −0.68, −0.07 | −0.57 |
+| 3 | 51 | −0.36 | −0.76, −0.03 | −0.58 |
+| 5 | 51 | −0.20 | −0.70, +0.20 | −0.40 |
+| 10 | 49 | +0.12 | −0.48, +0.66 | −0.09 |
+| 21 (descriptive) | 17 | +0.14 | −1.91, +1.87 | −0.13 |
+| 42 | 0 | n/a | n/a | n/a |
+| 63 | 0 | n/a | n/a | n/a |
+| expiry | 45 | +0.28 | −0.74, +1.14 | +0.07 |
+
+*Table 2. Old-news put trades taken by the book, net P&L per trade in % of collateral; bootstrap 95% CI (10,000 draws); a 1-month put expires before 42 and 63 sessions.*
+
+Net of costs the put loses at 1 to 3 sessions, with intervals below zero. At 10 sessions, +0.12% is indistinguishable from zero and below the same put on matched ordinary days (+0.23%, CI −0.22 to +0.64).
 
 ## 7. Risk management
 
-**Limits.** At most five positions open, taken in order of entry; each gets one fifth of the book as cash collateral (strike × 100), so there is no leverage and no margin call. In 2024-25 the book averaged 1.00 open position and never held more than 4. The largest single loss was −1.63% of the book at 1x (C, −8.17% of its collateral), −1.73% at 2x.
+**Limits.** At most five positions, in order of entry, each with a fifth of the book as cash collateral: no leverage or margin call. The book averaged 1.00 open position, at most 4. The largest single loss was −1.63% of the book at 1x (C, −8.17% of its collateral), −1.73% at 2x.
 
-**Stops and de-risking.** There are none beyond the position cap. A position is held for 10 sessions whatever happens. If we ran the book we would add, and test first under committed rules: closing a put whose strike is breached by more than a set amount, and pausing new entries when market-wide implied volatility jumps. Neither was tested; neither is claimed.
+**Stops.** None beyond the position cap; every position is held 10 sessions. Untested candidates: a strike-breach exit and pausing entries when market-wide implied volatility jumps.
 
-**Market exposure.** Beta to the median TOP_100 daily return is 0.018 (R² 0.005, 492 days). This understates the true exposure: open puts are re-marked only at the fixed horizons (1, 2, 3, 5 and 10 sessions) and carried flat in between, so daily volatility, Sharpe and beta are measured on stale marks.
+**Market exposure.** Beta to the median TOP_100 daily return is 0.018 (R² 0.005, 492 days), understated because open puts are re-marked only at the fixed horizons and carried flat between, so daily volatility, Sharpe and beta use stale marks. Only market beta is estimated, because the permitted data have no stock or factor returns; a momentum and value regression is in §10.
 
-**Tail and regime.** A short put has a capped gain and a long left tail; trade P&L skew is −1.72. The worst quarter by entry, 2025Q1, had 9 trades and returned −2.68% (−3.12% at 2x), with a 44.44% hit rate. Four of the five worst trades entered between 2024-12-05 and 2025-03-03 (C, INTC, AAPL, BAC; CSCO is the fifth). Losses cluster in one period, and five equal positions with no stop give no protection against it.
+**Tail and regime.** Trade P&L skew is −1.72. The worst quarter by entry, 2025Q1, had 9 trades, −2.68% (−3.12% at 2x), hit rate 44.44%. Four of the five worst trades entered between 2024-12-05 and 2025-03-03 (C, INTC, AAPL, BAC; CSCO is the fifth); with no stop, five equal positions give no protection against such clustering.
 
 ## 8. Liquidity and capital
 
-We size each trade at no more than 10% of the put's volume on the entry day. At that limit the median trade takes $73,500 of collateral, so a five-slot book of about $367,500 fits half the trades; 8 of 49 trades allow no contract at all. Summed over all trades the limit allows $25,704,500 of collateral and $306,932 of P&L at 1x. Capital turns over 5.01 times a year against the whole book and 25.13 times against the capital actually in use, because the book is mostly idle.
+Each trade is capped at 10% of the put's entry-day volume, so the median trade takes $73,500 of collateral, and a five-slot book of about $367,500 fits half the trades; 8 of 49 trades allow no contract. In total the cap allows $25,704,500 of collateral and $306,932 of P&L at 1x. Capital turns over 5.01 times a year against the book and 25.13 against capital in use: the book is mostly idle.
 
-The one-month expiry is often a weekly option. Its ATM pair does not trade every session, and we mark from daily closes, not quotes. We require put volume above zero at entry and charge the larger of 5% of premium or $0.05 per share each way; the small 1x gain does not survive doubled costs.
+The 1-month expiry is often a weekly that does not trade every session; marks are daily closes, and entry requires put volume above zero.
 
 ## 9. Data and integrity
 
-**Sources.** Massive: 8-K disclosures (`/stocks/filings/8-K/vX/disclosures`), option contracts as of a date (`/v3/reference/options/contracts`), option daily bars (`/v2/aggs/ticker/O:…/range/1/day/…`). SEC EDGAR: acceptance times from filing headers and the full 8-K text. No stock prices: spot is recovered from ATM put-call parity. Every response is cached; the final check ran the notebook from a clean kernel with only the API key and the cache, without errors.
+**Sources:** Massive and SEC EDGAR (References). With no stock prices, spot comes from ATM put-call parity on the same chain, so contracts adjusted for splits, which carry their own tickers, need no price adjustment; parity ignores dividends. The notebook ran without errors from a clean kernel with only the API key and response cache.
 
-**Survivorship.** The universe is the static top 100 as of September 2026. These are firms that survived and grew, so selling puts on them in 2024-25 avoids names that later fell out after large declines. That biases short-put P&L upward for every book, ours and the benchmarks alike. Its effect on the old-versus-surprise contrast cannot be signed.
+**Survivorship.** The universe is the top 100 as of September 2026, firms that survived and grew: short-put P&L is biased upward for every book; the effect on the old-versus-surprise contrast cannot be signed.
 
-**Variants tested.** The test ledger (`data/oldnews/ledger.csv`) has 420 rows. 242 belong to 2024-25, in five runs: 113 for the primary tests, years and sensitivity grid; 1 for entry at `t_0 + 1`; 96 for the trade books and H2 in two runs (the second added risk metrics); and 32 exploratory diagnostics. The other 178 rows come from four earlier runs (labels `discovery` and `dryrun`, commit 6c7ecdf) made with the discarded 2022-23 setup before the 2024-25 data rule; none is used here. The dry run covered 2023-07-01 to 2023-12-31, which overlaps July and August of the notebook's sealed placeholder (2023-06-01 to 2023-08-31); its outputs were archived unused and never informed any 2024-25 choice. A start of the 2026 run was stopped after about one minute, during the filing-list download (2026-10-04 01:16-01:17 ET), before any 2026 event was built, measured or tested; see the decision log.
+**Variants tested.** The ledger (`data/oldnews/ledger.csv`) has 420 rows: 242 for 2024-25 in five runs (113 primary tests, years and sensitivity grid; 1 entry at `t_0 + 1`; 96 trade books and H2 over two runs; 32 exploratory diagnostics) and 178 from four runs of the discarded 2022-23 setup (labels `discovery`, `dryrun`; commit 6c7ecdf), none used here. The dry run (2023-07-01 to 2023-12-31) overlaps July and August of the sealed placeholder (2023-06-01 to 2023-08-31); archived unused, it informed no 2024-25 choice. A 2026 run was stopped during the filing-list download (2026-10-04 01:16-01:17 ET), before any 2026 event was built.
 
-**Disclosures from the decision log.** (1) The earnings exclusion uses earnings filings up to 5 sessions after entry; earnings dates are scheduled in advance, but this is information after entry. (2) The related-filing cue also matches on the other filing's event date, slightly wider than the plan's wording; one placebo filing differs and no label changes. (3) An end-to-end check found that the notebook path used the excerpt word score instead of the full text the plan makes primary; it was fixed, and the excerpt result is reported as a sensitivity (H1 −0.0118, one-sided p 0.4574). (4) In a scratch copy that was then deleted, the starter's example cells made 3,283 uncached API requests, over our 3,000 ask-first limit, and marked late-2025 exits with 2026 option prices. Nothing from it entered the test or the repository, and the notebook now clips all in-sample work before 2026-01-01.
+**Decision-log disclosures** (besides §4's earnings look-ahead). (1) The related-filing cue also matches the other filing's event date, slightly wider than the plan; it changes one placebo filing and no label. (2) The notebook path once used the excerpt word score, not the plan's primary full text; fixed, the excerpt result is a sensitivity (H1 −0.0118, one-sided p 0.4574). (3) A deleted scratch run of the starter's example cells made 3,283 uncached requests (ask-first limit 3,000) and marked late-2025 exits with 2026 prices; nothing from it was used, and in-sample work is clipped before 2026-01-01.
 
 ## 10. What we would test with more time
 
-- A longer sample. Detecting a 0.10 difference needs about 296 events per group; 2024-25 gives 45 and 101. If Massive confirms 2022-23 may be used, it would be an independent sample under the same frozen rules.
-- A classifier the two scores agree on. Math and words barely agree (kappa 0.097); testing the math score and the word score as separate committed hypotheses would show which, if either, carries information.
-- The volatility channel directly: implied-volatility change after the filing and a delta-hedged straddle, so the outcome does not mix volatility with direction.
+- A longer sample: detecting a 0.10 difference needs about 296 events per group, against 45 and 101. 2022-23, if Massive allows, would be an independent sample under the frozen rules.
+- The math and word scores as separate committed hypotheses, since they barely agree (kappa 0.097).
+- The volatility channel directly: implied-volatility change, a delta-hedged straddle.
+- A momentum and value regression, given stock and factor returns.
 - Quotes instead of closes for costs, and daily marks for every open position.
-- An earnings calendar known in advance, to remove the only input that looks past entry.
-- The stop and volatility-pause rules in §7, each committed before it is run.
+- An advance earnings calendar, removing the only input that looks past entry.
+- The §7 stop and volatility-pause rules, each committed first.
+
+## References
+
+*References and the appendix are outside the five-page body.*
+
+- Massive REST API: 8-K disclosures, `/stocks/filings/8-K/vX/disclosures`; option contracts as of a date, `/v3/reference/options/contracts`; option daily bars, `/v2/aggs/ticker/O:…/range/1/day/…`.
+- U.S. Securities and Exchange Commission, EDGAR (sec.gov): filing acceptance times and full 8-K text.
+- Benjamini, Y. and Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. *Journal of the Royal Statistical Society, Series B* 57(1), 289-300. (The q-values in §2-3.)
+- Software: Python; pandas; NumPy; matplotlib; requests; Jupyter (ipykernel, JupyterLab). Versions in `requirements.txt`.
+
+## Appendix
+
+| h | Old − surprise (95% CI) | BH q |
+|---|---|---|
+| 1 | −0.1844 (−0.7212, +0.3464) | 0.9501 |
+| 2 | +0.1400 (−0.1968, +0.4901) | 0.9501 |
+| 3 | +0.1433 (−0.1466, +0.4471) | 0.9501 |
+| 5 | +0.1913 (−0.0024, +0.3914) | 0.9501 |
+| 10 | +0.0966 (−0.0685, +0.2621) | 0.9501 |
+| 21 | −0.0579 (−0.4224, +0.2548) | 0.9501 |
+| 42 | n/a | n/a |
+| 63 | n/a | n/a |
+| expiry | −0.0131 (−0.1597, +0.1354) | 0.9501 |
+
+*Table A1. H1 by horizon, 1-month bucket; 33 events at 21 sessions, none at 42 or 63 (past expiry).*
+
+![Figure A1](../data/oldnews/figures/insample/walkthrough.png)
+
+*Figure A1. One filing end to end: event, acceptance, gap, label, entry and outcome.*
+
+![Figure A2](../data/oldnews/figures/insample/by_year.png)
+
+*Figure A2. Results by year, 2024 and 2025.*

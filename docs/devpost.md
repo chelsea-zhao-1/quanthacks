@@ -43,6 +43,15 @@ The options market seems to price these filings efficiently. The placebo looks l
 
 The judges' sealed-window run, a larger sample if Massive allows 2022–23, and quotes in place of last-trade marks.
 
+## Team
+
+- Sarah Spellman — [role]
+- Lalitha Kantam — [role]
+- Chelsea Zhao — [role]
+- Shayaan Nesargi — [role]
+
+One finance, two computer science and one computer engineering student, University of Florida.
+
 ## Built with
 
 Python, pandas, NumPy, matplotlib, requests, Jupyter, the Massive API (8-K disclosures, option contracts, daily option bars), SEC EDGAR, Claude Code, Git.
