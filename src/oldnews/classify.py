@@ -11,7 +11,13 @@ close before EDGAR acceptance), so the label never looks ahead:
   after its own entry. `run` and `classify` only read that file and refuse without it. The older 2022-23
   constants (src/oldnews/zref_frozen.json) are retired: no label can load them, only a test can read them, as an
   explicit read-only archive.
-- T is the number of word cues present (0 to 3), computed by the events agent.
+- T is the number of word cues present (0 to 3), computed by the events agent. The primary T is `T_full`: the three
+  plan cues on the full EDGAR text (events column T_full). For a filing whose full_text_status is not "ok" (empty,
+  missing, not_run, or a missing T_full) the excerpt T is used instead; that filing is flagged (`t_source`,
+  `t_fallback`) and the fallbacks are counted by the tests. Two sensitivity text sources are also scored, for every
+  weight set and cutoff: the excerpt T alone (`T_excerpt`, columns ..._excerpt) and T_full4, which adds the
+  exhibit flag cue_exhibit_dated_prior_full (columns ..._full4, with the same excerpt fallback). In every case
+  S = w_m * M + w_t * T and the primary weight sets and cutoff of 1 do not change.
 - S = w_m * M + w_t * T for each of the five fixed weight sets; old news if S >= cutoff.
 
 An event is "scored" only when its gap move exists and T is finite; the others are counted with the reason. The same scored sample is used
@@ -35,6 +41,9 @@ import pandas as pd
 
 INPUTS = ("gap_move", "d_iv_gap", "log_vol_gap_ratio")      # the volume input is log(volume ratio)
 GAP_COVERAGE_COLS = ("spot_bucket", "n_eff", "stale_sessions", "n_baseline")
+TEXT_SOURCES = ("full", "excerpt", "full4")   # which word score feeds S: primary (full text), excerpt, full text plus exhibit flag
+T_COLUMN = {"full": "T", "excerpt": "T_excerpt", "full4": "T4"}   # classified-table column holding each text source's T
+FULL_TEXT_COLS = ("full_text_status", "T_full", "T_full4", "cue_exhibit_dated_prior_full")   # events columns, when built with full text
 WEIGHT_SETS: dict[str, tuple[float, float]] = {     # name: (w_m, w_t), fixed by the test plan
     "equal": (1.0, 1.0),
     "math_only": (1.0, 0.0),
@@ -78,9 +87,22 @@ def as_bool(s: pd.Series) -> pd.Series:
     return s.map(lambda v: str(v).strip().lower() in {"1", "1.0", "true", "yes"}).astype(bool)
 
 
-def old_col(weights: str, cutoff: float) -> str:
-    """Column name of the old-news flag for one weight set and cutoff, e.g. old_equal_1."""
-    return f"old_{weights}_{cutoff:g}"
+def text_suffix(text: str = "full") -> str:
+    """"" for the primary text source (full text), "_excerpt" or "_full4" for the sensitivity sources."""
+    if text not in TEXT_SOURCES:
+        raise ValueError(f"text source must be one of {TEXT_SOURCES}, not {text!r}")
+    return "" if text == "full" else f"_{text}"
+
+
+def old_col(weights: str, cutoff: float, text: str = "full") -> str:
+    """Column name of the old-news flag for one weight set and cutoff, e.g. old_equal_1 (primary, full text),
+    old_equal_1_excerpt or old_equal_1_full4."""
+    return f"old_{weights}_{cutoff:g}{text_suffix(text)}"
+
+
+def s_col(weights: str, text: str = "full") -> str:
+    """Column name of the total score S for one weight set, e.g. S_equal, S_equal_excerpt, S_equal_full4."""
+    return f"S_{weights}{text_suffix(text)}"
 
 
 # ---- the window guard --------------------------------------------------------------------------------------
@@ -361,6 +383,11 @@ def classify(events: pd.DataFrame, gap: pd.DataFrame, ref: pd.DataFrame | None =
     (`n_inputs` says how many M used). An event without a gap move, or without T, is not scored: `scored` is
     False and `unscored_reason` says why, so it can be counted and reported.
 
+    T (the word score in S) is T_full where full_text_status is "ok", else the excerpt T (`T_excerpt`), with
+    `t_source` ("full" or "excerpt (<status>)") and `t_fallback` saying which. T4 is T_full4 (exhibit flag
+    added) with the same fallback. S_<weights>, old_<weights>_<cutoff> use T; the same columns with a suffix
+    _excerpt use T_excerpt and _full4 use T4, for every weight set and cutoff.
+
     The z-scores always use frozen constants (passed in as `ref`), so an event gets
     the same M whichever window, or whichever other events, it is classified with. The constants must be passed
     (`load_frozen()`); nothing is loaded here, so no window can pick up another file by accident."""
@@ -383,19 +410,32 @@ def classify(events: pd.DataFrame, gap: pd.DataFrame, ref: pd.DataFrame | None =
     ev["n_inputs"] = avail.sum(axis=1)
     has_gap = avail[:, 0] & ev["gap_usable"].to_numpy(bool)             # the gap move is required
     ev["M"] = np.where(has_gap, np.where(avail, z, 0.0).sum(axis=1) / np.maximum(avail.sum(axis=1), 1), np.nan)
-    ev["T"] = pd.to_numeric(ev["T"], errors="coerce")
+    # the word score: T_full where the full text was read ("ok"), else the excerpt T, flagged; T4 adds the exhibit flag
+    ev["T_excerpt"] = pd.to_numeric(ev["T"], errors="coerce")
+    for col in ("T_full", "T_full4", "cue_exhibit_dated_prior_full"):
+        ev[col] = pd.to_numeric(ev[col], errors="coerce") if col in ev else np.nan
+    status = ev["full_text_status"].fillna("not_run").astype(str) if "full_text_status" in ev else pd.Series("not_run", index=ev.index)
+    ev["full_text_status"] = status
+    full_ok = ((status == "ok") & np.isfinite(ev["T_full"])).to_numpy(bool)
+    full4_ok = ((status == "ok") & np.isfinite(ev["T_full4"])).to_numpy(bool)
+    ev["t_source"] = np.where(full_ok, "full", "excerpt (" + status.where(status != "ok", "T_full missing") + ")")
+    ev["t_fallback"] = ~full_ok
+    ev["T"] = ev["T_full"].where(full_ok, ev["T_excerpt"])
+    ev["T4"] = ev["T_full4"].where(full4_ok, ev["T_excerpt"])
     ev["scored"] = ev["gap_usable"] & np.isfinite(ev["M"]) & np.isfinite(ev["T"])
     why = pd.Series("", index=ev.index)
     why = why.mask(~ev["scored"], "T missing")
     why = why.mask(~ev["scored"] & ~(ev["gap_usable"] & np.isfinite(ev["M"])),
                    "no gap_move: " + ev["gap_reason"].map(short_reason))
     ev["unscored_reason"] = why.mask(~ev["scored"] & ~in_gap, "no gap row")
-    for name, (w_m, w_t) in WEIGHT_SETS.items():
-        s = (w_m * ev["M"] + w_t * ev["T"]).where(ev["scored"])
-        ev[f"S_{name}"] = s
-        for c in CUTOFFS:
-            ev[old_col(name, c)] = ev["scored"] & (s >= c)
-    ev["S"] = ev[f"S_{PRIMARY_WEIGHTS}"]
+    for text, tcol in T_COLUMN.items():
+        ok = ev["scored"] & np.isfinite(ev[tcol])               # the same scored sample for every rule, text source apart
+        for name, (w_m, w_t) in WEIGHT_SETS.items():
+            sc = (w_m * ev["M"] + w_t * ev[tcol]).where(ok)
+            ev[s_col(name, text)] = sc
+            for c in CUTOFFS:
+                ev[old_col(name, c, text)] = sc.notna() & (sc >= c)
+    ev["S"] = ev[s_col(PRIMARY_WEIGHTS)]
     ev["old"] = ev[old_col(PRIMARY_WEIGHTS, PRIMARY_CUTOFF)]
     ev["news"] = np.where(ev["scored"], np.where(ev["old"], "old", "surprise"), "unscored")
     ev.attrs["reference"] = ref

@@ -93,6 +93,14 @@ def synth(n_people=300, n_placebo=150, effect=-0.3, placebo_effect=0.0, seed=0, 
         else:
             tags = [str(rng.choice(PLACEBO))] + (["share_repurchase_program"] if rng.random() < 0.1 else [])
         cues = (rng.random(3) < [0.3, 0.3, 0.15]).astype(int)
+        status = str(rng.choice(["ok", "ok", "ok", "ok", "ok", "ok", "ok", "empty", "missing", "not_run"]))
+        f1, f2 = int(cues[0] or rng.random() < 0.25), int(cues[1] or rng.random() < 0.2)      # the full text sees more
+        exh = int(rng.random() < 0.15)
+        full = ({"full_text_status": status, "cue_dated_prior_full": f1, "cue_prior_wording_full": f2,
+                 "cue_related_filing_full": int(cues[2]), "cue_exhibit_dated_prior_full": exh,
+                 "T_full": f1 + f2 + int(cues[2]), "T_full4": f1 + f2 + int(cues[2]) + exh} if status == "ok" else
+                {"full_text_status": status, "cue_dated_prior_full": np.nan, "cue_prior_wording_full": np.nan,
+                 "cue_related_filing_full": np.nan, "cue_exhibit_dated_prior_full": np.nan, "T_full": np.nan, "T_full4": np.nan})
         acc = f"0000-{i:05d}"
         rid = f"event|{acc}"
         late = bool(rng.random() < 0.85)
@@ -103,7 +111,7 @@ def synth(n_people=300, n_placebo=150, effect=-0.3, placebo_effect=0.0, seed=0, 
                    "group": grp, "role": "CEO" if grp == "people" else "placebo", "tags": "|".join(tags),
                    "earnings_excluded": bool(rng.random() < 0.1), "cue_dated_prior": cues[0],
                    "cue_prior_wording": cues[1], "cue_related_filing": cues[2], "T": int(cues.sum()),
-                   "text_source": "supporting_text"})
+                   "text_source": "supporting_text", **full})
         gp.append(gap_row(rid, 1.3))
         for rnd in (1, 2):
             k2 = int(np.clip(k + rng.choice([-1, 1]) * rng.integers(6, 60), n_gap + 2, len(SESS) - 70))
@@ -171,7 +179,7 @@ check("five weight sets and three cutoffs as committed",
       cl.WEIGHT_SETS == {"equal": (1, 1), "math_only": (1, 0), "words_only": (0, 1), "math_heavy": (1, 0.5),
                          "words_heavy": (0.5, 1)} and cl.CUTOFFS == (0.5, 1.0, 1.5)
       and T.PRIMARY == {"weights": "equal", "cutoff": 1.0, "bucket": "1m", "horizon": "10", "otm": 3,
-                        "category": "all8"})
+                        "category": "all8", "text": "full"})
 
 # ---- the frozen 2024-25 constants and the classification ------------------------------------------------------
 c = cl.classify(events, gap, FROZEN)
@@ -262,7 +270,7 @@ check("no gap move (or the file says unusable) -> not scored, even with the othe
       not cx.scored.iloc[4:].any() and cx.M.iloc[4:].isna().all() and cx.old.iloc[4:].eq(False).all()
       and cx.unscored_reason.iloc[4].startswith("no gap_move") and cx.unscored_reason.iloc[5].startswith("no gap_move"))
 ev_t = events.copy()
-ev_t.loc[7, "T"] = np.nan
+ev_t.loc[7, ["T", "full_text_status"]] = [np.nan, "empty"]            # no full text and no excerpt T
 cg = cl.classify(ev_t, gap[gap.row_id != events.row_id[8]], FROZEN).set_index("row_id")
 check("unscored reasons: T missing, no gap row", cg.at[events.row_id[7], "unscored_reason"] == "T missing"
       and cg.at[events.row_id[8], "unscored_reason"] == "no gap row" and not cg.scored[[events.row_id[7], events.row_id[8]]].any())
@@ -273,6 +281,48 @@ check("an event gets the same z-scores, M and labels whichever other events it i
 check("classification never reads outcomes or ordinary days (signature: events, gap, ref)",
       list(cl.classify.__code__.co_varnames[:3]) == ["events", "gap", "ref"])
 check("classify() needs its constants passed in: no default file", raises(lambda: cl.classify(events, gap), ValueError))
+
+# ---- the word score: full text (primary), excerpt fallback, excerpt and exhibit variants ------------------------
+ok_ = c.full_text_status == "ok"
+check("T in S is T_full where the full text is ok, else the excerpt T (flagged)",
+      (c["T"][ok_] == c.T_full[ok_]).all() and (c["T"][~ok_] == c.T_excerpt[~ok_]).all() and (c.T_excerpt == events["T"]).all()
+      and (c.t_fallback == ~ok_).all() and (c.t_source[ok_] == "full").all() and not ok_.all() and ok_.sum() > 0
+      and (c["T"][ok_] != c.T_excerpt[ok_]).any(), f"{(~ok_).sum()} of {len(c)} fall back")
+check("fallbacks are named by their status: excerpt (empty), (missing), (not_run)",
+      set(c.t_source) == {"full", "excerpt (empty)", "excerpt (missing)", "excerpt (not_run)"}
+      and (c.t_source[~ok_] == "excerpt (" + c.full_text_status[~ok_] + ")").all())
+ev_bare = events.drop(columns=[x for x in cl.FULL_TEXT_COLS] + ["cue_dated_prior_full", "cue_prior_wording_full", "cue_related_filing_full"])
+cb = cl.classify(ev_bare, gap, FROZEN)
+check("an events table built without full text falls back to the excerpt for every filing, all flagged",
+      cb.t_fallback.all() and (cb.t_source == "excerpt (not_run)").all() and (cb["T"] == cb.T_excerpt).all()
+      and (cb.T4 == cb.T_excerpt).all() and cb.T_full.isna().all()
+      and np.allclose(cb.S.fillna(-9), cl.classify(events.assign(full_text_status="not_run"), gap, FROZEN).S.fillna(-9)))
+ev_odd = events.copy()
+ev_odd.loc[ev_odd.index[ok_.to_numpy()][:2], "T_full"] = np.nan                 # status ok but no T_full: also a fallback
+cod = cl.classify(ev_odd, gap, FROZEN)
+check("status ok without a T_full is a flagged fallback too",
+      (cod.t_source == "excerpt (T_full missing)").sum() == 2 and cod.t_fallback[ok_].sum() == 2)
+Tfull4 = c.T_full4.where(ok_, c.T_excerpt)
+check("T4 = T_full4 (exhibit flag added) where the full text is ok, else the excerpt T; exhibit flag adds 0 or 1",
+      (c.T4 == Tfull4).all() and ((c.T4 - c["T"])[ok_] == c.cue_exhibit_dated_prior_full[ok_]).all() and (c.T4 - c["T"])[~ok_].eq(0).all())
+r_ok = True
+for text, tcol in (("full", "T"), ("excerpt", "T_excerpt"), ("full4", "T4")):
+    for w, (a_, b_) in cl.WEIGHT_SETS.items():
+        sc = (a_ * s.M + b_ * s[tcol])
+        r_ok &= np.allclose(c.loc[c.scored, cl.s_col(w, text)], sc) and c.loc[~c.scored, cl.s_col(w, text)].isna().all()
+        for k in cl.CUTOFFS:
+            r_ok &= ((c[cl.old_col(w, k, text)]) == (c.scored & (c[cl.s_col(w, text)] >= k))).all()
+check("S and old flags exist for every weight set, cutoff and text source (full, excerpt, full4): S = w_m M + w_t T",
+      r_ok and cl.old_col("equal", 1.0) == "old_equal_1" and cl.old_col("equal", 1.0, "excerpt") == "old_equal_1_excerpt"
+      and cl.old_col("math_heavy", 0.5, "full4") == "old_math_heavy_0.5_full4" and cl.s_col("equal") == "S_equal"
+      and cl.s_col("equal", "excerpt") == "S_equal_excerpt" and raises(lambda: cl.old_col("equal", 1.0, "pdf"), ValueError))
+check("the primary rule is unchanged in form: old = old_equal_1 (S >= 1, equal weights) on the full-text T; same scored sample for every text source",
+      (c.old == c.old_equal_1).all() and np.allclose(c.S.fillna(-9), c.S_equal.fillna(-9))
+      and cl.PRIMARY_WEIGHTS == "equal" and cl.PRIMARY_CUTOFF == 1.0 and T.PRIMARY["text"] == "full"
+      and all((c[cl.s_col(w, t_)].notna() == c.scored).all() for w in cl.WEIGHT_SETS for t_ in cl.TEXT_SOURCES))
+check("the text source moves labels: the excerpt and exhibit variants differ from the primary somewhere, math-only never does",
+      (c.old_equal_1 != c.old_equal_1_excerpt).any() and (c.old_equal_1 != c.old_equal_1_full4).any()
+      and (c.old_math_only_1 == c.old_math_only_1_excerpt).all() and (c.old_math_only_1 == c.old_math_only_1_full4).all())
 
 # ---- the window guard, label by label (.claude/ctx/06_window_guard.md; same rules as trade.check_dates) -------
 NOWHERE = TMP / "nowhere"                       # a folder that does not exist: a refusal must come before any read
@@ -496,19 +546,46 @@ ok &= all(np.allclose(prof[prof.test == t].q_bh, stats.benjamini_hochberg(prof[p
 check("horizon profile: 9 horizons x 3 tests, BH within each test", ok)
 check("profile h=10 matches the primary H1", np.isclose(prof[(prof.test == "H1") & (prof.horizon == "10")].effect.iloc[0], h.effect))
 sens = T.sensitivity(inp, log, NP, NB)
-check("sensitivity: 13 one-at-a-time rows",
-      sens.dimension.value_counts().to_dict() == {"primary": 1, "weights": 4, "cutoff": 2, "bucket": 2, "otm": 2, "category": 2},
+check("sensitivity: 23 one-at-a-time rows (13 as before, excerpt T and T_full4 for each of the 5 weight sets)",
+      sens.dimension.value_counts().to_dict() == {"primary": 1, "weights": 4, "cutoff": 2, "bucket": 2, "otm": 2, "category": 2,
+                                                  "text_excerpt": 5, "text_full4": 5},
       str(sens.dimension.value_counts().to_dict()))
 check("sensitivity primary row equals H1", np.isclose(sens[sens.dimension == "primary"].effect.iloc[0], h.effect))
 cat = sens.set_index("category")
 check("departures-only is a subset, plus_extra adds filings",
       cat.at["departures", "n"] < h.n < cat.at["plus_extra", "n"], f"{cat.at['departures', 'n']} < {h.n} < {cat.at['plus_extra', 'n']}")
+sx = sens[sens.dimension == "text_excerpt"].set_index("weights")
+s4 = sens[sens.dimension == "text_full4"].set_index("weights")
+hx = T.h1(inp, log, NP, NB, weights="words_only", text="excerpt").iloc[0]
+check("sensitivity text sources: excerpt T and T_full4 each for all 5 weight sets, tagged in the text column",
+      list(sx.index) == list(cl.WEIGHT_SETS) and list(s4.index) == list(cl.WEIGHT_SETS)
+      and (sx.text == "excerpt").all() and (s4.text == "full4").all() and (sens[~sens.dimension.isin(["text_excerpt", "text_full4"])].text == "full").all()
+      and (sx.cutoff == 1.0).all() and (s4.cutoff == 1.0).all() and (sx.n == h.n).all() and (s4.n == h.n).all(),
+      f"n {sx.n.iloc[0]}, {s4.n.iloc[0]} vs {h.n}")
+check("a text-source row is H1 with that word score: matches a direct call and the old flags of the sample",
+      np.isclose(sx.at["words_only", "effect"], hx.effect) and sx.at["words_only", "n_old"] == hx.n_old
+      and hx.text == "excerpt" and sx.at["words_only", "n_old"] != sens[sens.dimension == "weights"].set_index("weights").at["words_only", "n_old"]
+      and sx.at["math_only", "n_old"] == sens[sens.dimension == "weights"].set_index("weights").at["math_only", "n_old"])
+ts = T.text_source(inp).set_index("what")
+tp = ts["people"]
+cs = inp.classified
+bs = cs[cs.late & ~cs.earnings_excluded & cs.scored & (cs.group == "people")]
+check("text-source counts: scored = full text + fallbacks; fallbacks by status; exhibit and change counts",
+      tp["scored filings"] == len(bs) and tp["word score T from the full text (T_full)"] == (~bs.t_fallback).sum()
+      and tp["fallbacks in all"] == bs.t_fallback.sum()
+      and tp["fallbacks in all"] == sum(v for k, v in tp.items() if k.startswith("word score T from the excerpt, fallback"))
+      and tp["word score T from the full text (T_full)"] + tp["fallbacks in all"] == tp["scored filings"]
+      and tp["word score T from the excerpt, fallback: empty"] == (bs.t_source == "excerpt (empty)").sum() > 0
+      and tp["  exhibit flag set (cue_exhibit_dated_prior_full)"] == bs.cue_exhibit_dated_prior_full.eq(1).sum() > 0
+      and tp["  T_full differs from the excerpt T (full text used)"] == ((bs["T"] != bs.T_excerpt) & ~bs.t_fallback).sum() > 0
+      and tp["  T_full4 differs from T_full (full text used)"] == tp["  exhibit flag set (cue_exhibit_dated_prior_full)"],
+      str(tp.to_dict())[:150])
 check("words-only rule gives the same sample, different labels",
-      sens.set_index("weights").at["words_only", "n"] == h.n)
+      sens[sens.dimension == "weights"].set_index("weights").at["words_only", "n"] == h.n)
 
 led = pd.read_csv(log.path)
 check("every test is in the ledger (seed, permutations, head, run id)",
-      len(led) == 7 + 27 + 13 and (led.seed == T.SEED).all() and (led.n_perm == NP).all()
+      len(led) == 7 + 1 + 27 + 23 and (led.seed == T.SEED).all() and (led.n_perm == NP).all()
       and (led.git_head == "synthetic-head").all() and set(led.kind) == {"oldnews_H1", "oldnews_H1b", "oldnews_P"},
       f"{len(led)} rows")
 
@@ -517,7 +594,7 @@ dd_ = write_tables(TMP / "run", "insample", (events, nulls, gap, outcome))
 t0 = time.time()
 res = T.run("insample", dd_, n_perm=NP, n_boot=NB, log=T.Log(dd_ / "ledger.csv", "run-1", "synthetic-head"))
 el = time.time() - t0
-files = {"counts.csv", "coverage.csv", "h1.csv", "h1b.csv", "placebo.csv", "profile.csv", "sensitivity.csv", "summary.md",
+files = {"counts.csv", "coverage.csv", "text_source.csv", "h1.csv", "h1b.csv", "placebo.csv", "profile.csv", "sensitivity.csv", "summary.md",
          "by_year.csv", "profile_by_year.csv", "counts_by_year.csv"}
 check("run writes every table and the summary", files <= {f.name for f in (dd_ / "results_insample").iterdir()}
       and (dd_ / "classified_insample.csv").exists() and (dd_ / "zref_insample.csv").exists(), f"{el:.1f}s")
@@ -528,6 +605,16 @@ check("summary names the 2024-25 constants file, the date window and the sealed 
       "frozen insample constants" in summ and "zref_frozen_insample.json" in summ
       and "every date inside [2024-01-01, 2026-01-01)" in summ and "sealed window 2023-06-01..2023-08-31" in summ)
 check("run reproduces the direct H1", np.isclose(res["h1"].effect.iloc[0], h.effect))
+check("summary reports where the word score came from, with the fallback count",
+      "## Word score text source" in summ and "word score T from the full text (T_full)" in summ
+      and "fallbacks in all" in summ and "excerpt T and with T_full4" in summ and (dd_ / "results_insample" / "text_source.csv").exists())
+check("sensitivity table in the summary shows the text column and both variants",
+      "| dimension | weights | text |" in summ and "text_excerpt" in summ and "text_full4" in summ
+      and set(res["sensitivity"].text) == {"full", "excerpt", "full4"})
+cl_csv = pd.read_csv(dd_ / "classified_insample.csv")
+check("the classified file carries T, T_excerpt, T4, t_source and t_fallback, and the full-text columns",
+      {"T", "T_excerpt", "T4", "T_full", "T_full4", "t_source", "t_fallback", "full_text_status"} <= set(cl_csv.columns)
+      and (cl_csv.t_fallback == (cl_csv.full_text_status != "ok")).all())
 res2 = T.run("insample", dd_, n_perm=NP, n_boot=NB, log=T.Log(dd_ / "ledger.csv", "run-2", "synthetic-head"))
 check("two runs give identical tables", all(res[k].equals(res2[k]) for k in res))
 cls = pd.read_csv(dd_ / "classified_insample.csv")
@@ -567,8 +654,10 @@ check("counts by year: n per step and group for each year",
 led_i = pd.read_csv(dd_ / "ledger.csv")
 led_i = led_i[led_i.run_id == "run-1"]
 yr = led_i["filter"].str.extract(r"year=(\d{4})")[0]
+check("text-source variants are in the ledger, the text in the filter column",
+      led_i["filter"].str.contains(r"\|text=excerpt").sum() == 5 + 0 and led_i["filter"].str.contains(r"\|text=full4").sum() == 5)
 check("every pooled and by-year test is in the ledger, the year in the filter column",
-      len(led_i) == 43 + 2 * (3 + 27) and yr.notna().sum() == 60 and yr.value_counts().to_dict() == {"2024": 30, "2025": 30}
+      len(led_i) == 53 + 2 * (3 + 27) and yr.notna().sum() == 60 and yr.value_counts().to_dict() == {"2024": 30, "2025": 30}
       and set(led_i.kind) == {"oldnews_H1", "oldnews_H1b", "oldnews_P"} and (led_i.seed == T.SEED).all(), f"{len(led_i)} rows")
 check("summary: by-year section with each year's H1, H1b and P, the profile and the counts",
       all(k in summ for k in ("## By year", "### 2024", "### 2025", "Horizon profile by year", "Counts by year", "**H1** (negative)",

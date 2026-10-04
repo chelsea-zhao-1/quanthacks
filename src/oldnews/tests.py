@@ -41,7 +41,7 @@ DEPARTURE_TAGS = frozenset({"ceo_departure", "cfo_departure", "executive_officer
 EXTRA_TAGS = frozenset({"deal_termination", "business_update", "share_repurchase_program"})
 CATEGORIES = ("all8", "departures", "plus_extra")
 PRIMARY = {"weights": cl.PRIMARY_WEIGHTS, "cutoff": cl.PRIMARY_CUTOFF, "bucket": "1m", "horizon": "10", "otm": 3,
-           "category": "all8"}
+           "category": "all8", "text": "full"}
 PREDICTION = {"H1": "negative", "H1b": "negative", "P": "no difference"}
 DATA_DIR = cl.DATA_DIR
 
@@ -227,9 +227,9 @@ def _empty_row(note: str) -> dict:
 
 # ---- one row per test --------------------------------------------------------------------------------------
 def _spec(test: str, group: str, category: str, weights: str, cutoff: float, bucket: str, horizon: str,
-          otm: int, metric: str, comparison: str) -> dict:
+          otm: int, metric: str, comparison: str, text: str = "full") -> dict:
     return {"test": test, "prediction": PREDICTION[test], "group": group, "category": category,
-            "weights": weights, "cutoff": float(cutoff), "bucket": bucket, "horizon": norm_horizon(horizon),
+            "weights": weights, "text": text, "cutoff": float(cutoff), "bucket": bucket, "horizon": norm_horizon(horizon),
             "otm": int(otm), "metric": metric, "comparison": comparison}
 
 
@@ -242,12 +242,14 @@ def _finish(row: dict, n_perm: int, n_boot: int) -> dict:
 
 
 def _contrast_row(inp: Inputs, test: str, group: str, category: str, weights: str, cutoff: float, bucket: str,
-                  horizon: str, otm: int, n_perm: int, n_boot: int) -> dict:
-    """H1 and P: old minus surprise of (event Y minus mean Y of its matched ordinary days)."""
+                  horizon: str, otm: int, n_perm: int, n_boot: int, text: str = "full") -> dict:
+    """H1 and P: old minus surprise of (event Y minus mean Y of its matched ordinary days). `text` picks the word
+    score source: "full" (primary), "excerpt" or "full4"."""
     row = _spec(test, group, category, weights, cutoff, bucket, horizon, otm,
-                "y_minus_matched_nulls", "surprise events")
+                "y_minus_matched_nulls", "surprise events", text)
     c = inp.classified
     ev = c.loc[universe(c, group, category)]
+    ev = ev[ev[cl.s_col(weights, text)].notna()]                       # a text variant needs its own word score
     y = cell(inp, bucket, horizon, otm)
     ev = ev[ev["row_id"].isin(y.index)]
     E = ev["row_id"].map(y).to_numpy(float)
@@ -255,7 +257,7 @@ def _contrast_row(inp: Inputs, test: str, group: str, category: str, weights: st
         return _finish({**row, **_empty_row("no usable events")}, n_perm, n_boot)
     d, keep = stats.matched_diffs(E, matched_nulls(inp, ev["row_id"], y))
     ev = ev[keep]
-    old = ev[cl.old_col(weights, cutoff)].to_numpy(bool)
+    old = ev[cl.old_col(weights, cutoff, text)].to_numpy(bool)
     n_old, n_sur = int(old.sum()), int((~old).sum())
     base = {**_empty_row(""), "n": len(d), "n_old": n_old, "n_comp": n_sur, "n_tickers": ev["ticker"].nunique()}
     if n_old == 0 or n_sur == 0:
@@ -275,13 +277,13 @@ def _contrast_row(inp: Inputs, test: str, group: str, category: str, weights: st
 
 
 def _h1b_row(inp: Inputs, category: str, weights: str, cutoff: float, bucket: str, horizon: str, otm: int,
-             n_perm: int, n_boot: int) -> dict:
+             n_perm: int, n_boot: int, text: str = "full") -> dict:
     """Old events' Y minus the mean Y of every usable ordinary day whose gap move is at least the event's."""
     row = _spec("H1b", "people", category, weights, cutoff, bucket, horizon, otm,
-                "y_minus_gap_pool", "ordinary days with gap_move >= event's")
+                "y_minus_gap_pool", "ordinary days with gap_move >= event's", text)
     c = inp.classified
     y = cell(inp, bucket, horizon, otm)
-    ev = c.loc[universe(c, "people", category) & c[cl.old_col(weights, cutoff)]]
+    ev = c.loc[universe(c, "people", category) & c[cl.old_col(weights, cutoff, text)]]
     ev = ev[ev["row_id"].isin(y.index)]
     g = inp.gap
     pool = pd.Index(inp.nulls["row_id"].unique()).intersection(g.index[g["gap_usable"]]).intersection(y.index)
@@ -315,10 +317,10 @@ def _row(inp: Inputs, test: str, n_perm: int, n_boot: int, **kw) -> dict:
     s = {**PRIMARY, **kw}
     if test == "H1b":
         return _h1b_row(inp, s["category"], s["weights"], s["cutoff"], s["bucket"], s["horizon"], s["otm"],
-                        n_perm, n_boot)
+                        n_perm, n_boot, s["text"])
     group, category = ("placebo", "all") if test == "P" else ("people", s["category"])
     return _contrast_row(inp, test, group, category, s["weights"], s["cutoff"], s["bucket"], s["horizon"],
-                         s["otm"], n_perm, n_boot)
+                         s["otm"], n_perm, n_boot, s["text"])
 
 
 # ---- ledger ------------------------------------------------------------------------------------------------
@@ -327,8 +329,8 @@ def _log(table: pd.DataFrame, log: Log | None) -> pd.DataFrame:
     t = table
     led = pd.DataFrame({
         "kind": "oldnews_" + t["test"], "level": t["weights"], "group": t["group"], "subset": t["category"],
-        "filter": "S>=" + t["cutoff"].map("{:g}".format) + t["period"].map(
-            lambda v: "" if v == "pooled" else f"|year={v}"), "metric": t["metric"], "strategy": "",
+        "filter": "S>=" + t["cutoff"].map("{:g}".format) + t["text"].map(lambda v: "" if v == "full" else f"|text={v}")
+        + t["period"].map(lambda v: "" if v == "pooled" else f"|year={v}"), "metric": t["metric"], "strategy": "",
         "bucket": t["bucket"], "horizon": t["horizon"], "otm": t["otm"], "entry": "t_0", "n_sets": t["n"],
         "n_tickers": t["n_tickers"], "event_mean": t["mean_old"], "null_mean": t["mean_comp"], "diff": t["effect"],
         "p_perm": t["p"], "q_bh": t["q_bh"], "trimmed_diff": t["trimmed_effect"], "loto_holds": t["loto_holds"],
@@ -370,13 +372,17 @@ def horizon_profile(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n
 
 
 def sensitivity(inp: Inputs, log: Log | None = None, n_perm: int = N_PERM, n_boot: int = N_BOOT) -> pd.DataFrame:
-    """H1 with one setting changed at a time from the primary spec (horizons are in horizon_profile)."""
+    """H1 with one setting changed at a time from the primary spec (horizons are in horizon_profile). The word
+    score text source is varied too: the excerpt T and the full-text-plus-exhibit T_full4, each for every weight
+    set at the primary cutoff."""
     specs = [("primary", {})]
     specs += [("weights", {"weights": w}) for w in cl.WEIGHT_SETS if w != PRIMARY["weights"]]
     specs += [("cutoff", {"cutoff": c}) for c in cl.CUTOFFS if c != PRIMARY["cutoff"]]
     specs += [("bucket", {"bucket": b}) for b in BUCKETS if b != PRIMARY["bucket"]]
     specs += [("otm", {"otm": o}) for o in OTMS if o != PRIMARY["otm"]]
     specs += [("category", {"category": k}) for k in CATEGORIES if k != PRIMARY["category"]]
+    specs += [("text_excerpt", {"weights": w, "text": "excerpt"}) for w in cl.WEIGHT_SETS]    # excerpt T, every weight set
+    specs += [("text_full4", {"weights": w, "text": "full4"}) for w in cl.WEIGHT_SETS]        # full text + exhibit flag
     t = pd.DataFrame([{"dimension": dim, **_row(inp, "H1", n_perm, n_boot, **kw)} for dim, kw in specs])
     return _log(t.assign(period="pooled"), log)
 
@@ -406,6 +412,27 @@ def counts(inp: Inputs) -> pd.DataFrame:
         reasons.index = "  not scored: " + reasons.index.astype(str)
         out = pd.concat([out, reasons.rename_axis("step").reset_index()], ignore_index=True)
     return out
+
+
+def text_source(inp: Inputs) -> pd.DataFrame:
+    """Where the word score T came from, for the late, earnings-excluded filings that were scored, by group:
+    the full text, or the excerpt as a flagged fallback (by full_text_status). Also how often the full text
+    changes T against the excerpt and how often the exhibit flag is set. Everything here is a count of cues."""
+    c = inp.classified
+    b = c["late"] & ~c["earnings_excluded"] & c["scored"]
+    cols = {}
+    for group in ("people", "placebo"):
+        s = c[b & (c["group"] == group)]
+        full = ~cl.as_bool(s["t_fallback"])
+        rows = [("scored filings", len(s)), ("word score T from the full text (T_full)", int(full.sum()))]
+        fb = s.loc[~full, "t_source"].value_counts()
+        rows += [("word score T from the excerpt, fallback: " + k.replace("excerpt (", "").rstrip(")"), int(v)) for k, v in fb.items()]
+        rows += [("fallbacks in all", int((~full).sum())),
+                 ("  T_full differs from the excerpt T (full text used)", int((full & (s["T"] != s["T_excerpt"])).sum())),
+                 ("  exhibit flag set (cue_exhibit_dated_prior_full)", int((full & (s["cue_exhibit_dated_prior_full"] == 1)).sum())),
+                 ("  T_full4 differs from T_full (full text used)", int((full & (s["T4"] != s["T"])).sum()))]
+        cols[group] = dict(rows)
+    return pd.DataFrame(cols).fillna(0).rename_axis("what").reset_index()
 
 
 def coverage(inp: Inputs) -> pd.DataFrame:
@@ -512,6 +539,10 @@ def _summary(label: str, t: dict, cap: tuple | None, log: Log, n_perm: int, n_bo
                 "separately below as a robustness check (same rules, n per group in every row).", ""] if years else []),
              "## Counts", "", _md(t["counts"]), "",
              "## Coverage of the gap inputs (late, earnings-excluded filings)", "", _md(t["coverage"]), "",
+             "## Word score text source (scored late, earnings-excluded filings)", "",
+             "T in S is the full-text T_full; a filing whose full text is not ok falls back to the excerpt T and is "
+             "counted here. The sensitivity table repeats H1 with the excerpt T and with T_full4 (exhibit flag added).",
+             "", _md(t["text_source"]), "",
              *(["Dropped at the window edge before anything was computed:", "", _md(dropped), ""]
                if len(dropped) else []),
              "## H1 (primary): old minus surprise, h = 10, 1-month bucket. Prediction: negative", "", _fmt(h)]
@@ -523,7 +554,7 @@ def _summary(label: str, t: dict, cap: tuple | None, log: Log, n_perm: int, n_bo
               _fmt(p), "", "## Horizon profile (BH q across the nine horizons, within each test)", ""]
     cols = ["test", "horizon", "n", "n_old", "n_comp", "effect", "ci_lo", "ci_hi", "p", "q_bh", "descriptive"]
     lines += [_md(t["profile"][cols]), "", "## Sensitivity (H1, one change at a time)", ""]
-    cols = ["dimension", "weights", "cutoff", "bucket", "otm", "category", "n", "n_old", "n_comp", "effect",
+    cols = ["dimension", "weights", "text", "cutoff", "bucket", "otm", "category", "n", "n_old", "n_comp", "effect",
             "ci_lo", "ci_hi", "p_one_sided", "descriptive"]
     lines += [_md(t["sensitivity"][cols]), ""]
     if years:
@@ -567,7 +598,7 @@ def run(label: str, data_dir: Path = DATA_DIR, NB: dict | None = None, n_perm: i
     inp = prepare(frames["events"], frames["nulls"], frames["gap"], frames["outcome"], classified=classified)
     log = log or Log(data_dir / "ledger.csv")
     before = ledger.variant_count(Path(log.path))
-    t = {"counts": counts(inp), "coverage": coverage(inp), "h1": h1(inp, log, n_perm, n_boot), "h1b": h1b(inp, log, n_perm, n_boot),
+    t = {"counts": counts(inp), "coverage": coverage(inp), "text_source": text_source(inp), "h1": h1(inp, log, n_perm, n_boot), "h1b": h1b(inp, log, n_perm, n_boot),
          "placebo": placebo(inp, log, n_perm, n_boot), "profile": horizon_profile(inp, log, n_perm, n_boot),
          "sensitivity": sensitivity(inp, log, n_perm, n_boot)}
     if years:
