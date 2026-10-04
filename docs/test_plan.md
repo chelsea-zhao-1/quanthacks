@@ -55,6 +55,21 @@ ordinary days from the whole sample):
 3. Option volume in the gap: total volume of the ATM pair over the gap sessions divided by its average over
    the 5 sessions before the gap.
 
+**Coverage rules for the gap inputs** (amended before any outcome was looked at; the first draft required a
+fresh mark on the 1-month ATM pair at the gap start and five cached baseline sessions, which left 49 of 258
+late people-news events measurable because the cached strikes were chosen at the filing date):
+
+- Spot at the gap start and at `t_pre` is the parity spot from the 1-month ATM pair; if that pair has no
+  mark on the day, from the 2-month, then the 3-6 month ATM pair (spot does not depend on expiry); if no
+  pair has a mark on the gap start, from the latest mark on or before it and no more than 3 sessions
+  earlier, in which case `n` in the gap-move formula is the number of sessions from that mark to `t_pre`.
+  `sigma` comes from the same bucket as the spot.
+- Volume baseline: the mean over the cached sessions among the 5 before the gap start, at least 2 of them;
+  otherwise the volume input is missing.
+- The implied-volatility change needs a 1-month mark at both ends; otherwise it is missing.
+- `M` is the mean of the available standardised inputs. The gap move is required: an event without it is
+  not scored, and is counted and reported.
+
 **Word score T**, the number of these cues present (0 to 3):
 
 1. Dated prior announcement: the filing text dates an announcement or press release before the filing date.
