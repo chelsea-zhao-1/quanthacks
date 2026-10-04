@@ -2,19 +2,19 @@
 
 ## 1. Hypothesis
 
-Item 5.02 filings at the 100 largest US companies (executive and director departures and appointments) are mostly filed days after the event. We believed they come in two kinds: *old news*, which the market heard first (the stock moved unusually between event and filing, or the filing says the news was public), and *surprise news* (no sign of either). Either way the filing is a dated headline that draws option demand and lifts implied volatility, and unlike earnings nothing follows to bring it down. After surprise news that premium pays for a move to come; after old news, for one already made. We predicted realised volatility would fall short of implied by more after old news (H1: 10 sessions, 1-month options), so a cash-secured put sold on old news would beat the same put elsewhere (H2).
+**This is a null result: a specific mechanism, rules fixed in advance, and 2024-25 data that do not support it.** Executive and director departures and appointments (Item 5.02) at the 100 largest US companies are mostly filed days after the event. We believed they come in two kinds: *old news*, which the market heard first (the stock moved unusually between event and filing, or the filing says the news was public), and *surprise news* (no sign of either). Either way the filing is a dated headline that draws option demand and lifts implied volatility, and unlike earnings nothing follows to bring it down. After surprise news that premium pays for a move to come; after old news, for one already made. We predicted realised volatility would fall short of implied by more after old news (H1: 10 sessions, 1-month options), so a cash-secured put sold on old news would beat the same put elsewhere (H2).
 
-**Finding: the hypothesis is not supported in 2024-25.** Rules were committed on 2026-10-03; every amendment (`docs/decision_log.md`) preceded any 2024-25 outcome. An earlier exploratory run on 2022-23 was discarded because the challenge allows only 2024-25 data.
+Rules were committed on 2026-10-03; every amendment (`docs/decision_log.md`) preceded any 2024-25 outcome. An earlier exploratory run on 2022-23 was discarded because the challenge allows only 2024-25 data.
 
 ## 2. Method
 
 Filings from 2024-01-01 to 2025-12-31, pooled, each year a check; spot from ATM put-call parity. **Events:** late if the cover-page event date is at least one business day before acceptance; dropped if an earnings filing for the ticker lies within ±5 sessions. Entry `t_0` is the first close after EDGAR acceptance (next session if after 15:30 ET); `t_pre` is the last close before it. The gap runs from the session before the event date to `t_pre`.
 
-**Classification:** S = M + T, old news if S ≥ 1. M averages three gap inputs standardised with constants frozen from 1,245 ordinary days: gap move |r_gap − r_mkt| / (σ√n) (r_mkt the TOP_100 median), implied-volatility change, and log option volume over its prior 5-session average. T counts full-text cues: a dated prior announcement, "previously announced/disclosed/reported", an earlier people-news 8-K by the ticker within 30 days.
+**Classification:** S = M + T, old news if S ≥ 1. M averages three gap inputs standardised with constants frozen from 1,245 ordinary days. The inputs are the gap move |r_gap − r_mkt| / (σ√n) (r_mkt the TOP_100 median), the implied-volatility change, and log option volume over its prior 5-session average. T counts full-text cues: a dated prior announcement, "previously announced/disclosed/reported", an earlier people-news 8-K by the ticker within 30 days.
 
 **Outcome:** Y_h = log(RV_h / IV_0), parity-spot realised volatility from `t_0` to h over 1-month ATM implied volatility at `t_0`, minus its mean on matched ordinary days (same ticker, ±60 sessions, over 5 sessions from any 8-K, same gap length).
 
-**Tests:** H1, old minus surprise, one-sided label permutation (10,000 draws, seed 20261003); H1b, old events against ordinary days with gap moves at least as large; P, H1 on late governance and payout filings; H2, the put net of costs against ordinary days and all late filings. Every horizon gets a bootstrap 95% interval and Benjamini-Hochberg q. The ledger holds 337 variants in 6 runs.
+**Tests:** H1, old minus surprise, one-sided label permutation (10,000 draws, seed 20261003); H1b, old events against ordinary days with gap moves at least as large; P, H1 on late governance and payout filings; H2, the put net of costs against ordinary days. Every horizon gets a bootstrap 95% interval and Benjamini-Hochberg q. The ledger holds 337 variants in 6 runs.
 
 ## 3. Result
 
@@ -40,18 +40,18 @@ H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0
 
 *Table 1. H1 by horizon, 1-month bucket; 33 events at 21 sessions, none at 42 or 63 (past expiry). 2026: one-time run, pending.*
 
-**Sensitivity** (23 one-at-a-time settings: weights, cutoff, bucket, strike, category, text source; grid in the notebook): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. `t_0 + 1` was not computed.
+**Sensitivity** (23 one-at-a-time settings: weights, cutoff, bucket, strike, category, text source; grid in the notebook): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. Entry session `t_0 + 1`: {{sens_entry1}}.
 
 **Exploratory diagnostics** (after the result): the minimum detectable effect is 0.2109 (80% power); the null rules out a true effect below −0.0429 but not a small negative one. Leaving out each of 59 tickers never flips the sign (+0.0553 to +0.1173).
 
 ## 4. What would break it
 
-- **Classifier.** Math and word labels barely agree (Cohen's kappa 0.097), and 35 of 45 old calls are events the math alone calls surprise, so "old news" mostly means disclosure wording.
-- **Private event date.** The cover-page date is the company's own, not when the market heard.
+- **Classifier.** Math and word labels barely agree (Cohen's kappa 0.097), and 35 of 45 old calls are events the math alone calls surprise.
+- **Private event date.** The cover-page date is the company's, not when the market heard.
 - **Selection.** Late filing is a choice; the universe is today's top 100.
-- **Information after entry.** 2024 events are standardised partly with later gap inputs (never outcomes), and the earnings exclusion looks up to 5 sessions past entry: earnings dates are scheduled, but the filings come later.
+- **Information after entry.** Constants use later 2024-25 gap inputs (never outcomes); the earnings exclusion looks up to 5 sessions past entry, at scheduled dates whose filings come later.
 - **Thin options.** Weekly 1-month expiries miss sessions; 16 gap-start marks are 1 to 3 sessions old; closes are not quotes; parity ignores dividends.
-- **Sealed window.** We predict no detectable old-versus-surprise difference.
+- **Sealed window.** We predict no detectable old-versus-surprise difference. Thin option coverage there may leave fewer than 30 events, and the result is then labelled descriptive.
 
 ## 5. How to trade it
 
@@ -70,7 +70,8 @@ Delete this section before submission. `RN` = `data/oldnews/README_numbers.md` (
 | Placeholder | Source |
 |---|---|
 | `{{oos_h}}` (h = 1, 2, 3, 5, 10, 21, 42, 63, exp) | `data/oldnews/results_oos/profile.csv`, rows `test` = H1: `effect` (`ci_lo`, `ci_hi`). Only after a human runs the one-time 2026 test; otherwise delete the column and say 2026 was not run |
-| (none left besides `{{oos_h}}`) | The diagnostics placeholders are filled below. No file gives the trade mean without its most influential trade, so the note states only the mean trade against the C loss. |
+| `{{sens_entry1}}` | coordinator: H1 at h = 10 with entry at `t_0 + 1` (effect, 95% CI, one-sided p), from the entry-shift run. Also check that the "23 settings, 7 negative" count still describes the grid without it. |
+| (no others besides `{{oos_h}}`) | The diagnostics placeholders are filled below. No file gives the trade mean without its most influential trade, so the note states only the mean trade against the C loss. |
 
 **Filled from the exploratory diagnostics** (`D` = `data/oldnews/results_insample/diagnostics/`, run `20261003T223046-a26cb6`, git `2a67f5b61a`)
 
