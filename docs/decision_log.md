@@ -46,3 +46,14 @@ with the reason and what had been looked at.
 - **Full-text cues are primary** (amendment to the test plan, before any 2024-25 outcome was analysed): Massive allows
   full EDGAR text; the excerpt-based cues fired in 19 of 271 late people-news filings against 68 for full text. The
   excerpt stays as a sensitivity variant and the fallback. Only cue frequencies were looked at.
+
+## 2026-10-03 night: the real 2024-25 result
+- The committed test was run once on 2024-25 with the frozen constants (commit 5bbfd9d) and no tuning: pooled H1 at 10
+  sessions (1-month bucket) has the wrong sign and is not significant (45 old, 101 surprise events; difference +0.097,
+  95% interval -0.069 to +0.262, one-sided p = 0.86). H1b has the predicted sign without significance; the placebo shows no
+  difference; no horizon passes the multiple-testing correction; the excerpt and exhibit variants are not significant.
+  The result is reported as a null. No rule, threshold or definition is changed because of it.
+- **Updated sealed-window prediction** (written after this result and before the sealed window is run): we expect no
+  detectable old-versus-surprise difference there. The earlier prediction in the test plan (the sign holds without
+  significance) is superseded by this one; the original text stays in the plan's history.
+- Whether to run the one-time 2026 out-of-sample test is left to a human (default off).
