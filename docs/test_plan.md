@@ -23,7 +23,14 @@ is kept as an extra check. Everything after this paragraph describes the rules, 
 - Confirmation: filings from 2024-01-01 to 2025-12-31, every exit before 2026-01-01, run once with
   everything below unchanged.
 - Out-of-sample: 2026, run once by a human after everything is frozen.
-- Dry run of the judges' path: 2023-07-01 to 2023-12-31 (discovery data only).
+- Dry run of the judges' path: a 2024-07-01 to 2024-12-31 sub-window of the test window, run quietly (event count and timing
+  only, no results printed), to prove the path works. The sealed window is never used.
+
+**Sealed window (from the starter notebook).** Cell 10 of the notebook sets the placeholder for the judges' sealed
+window to 2023-06-01..2023-08-31 ("judges change these"), and cell 48 says options history on contestant keys
+covers only the in-sample and out-of-sample windows and that they must not be moved earlier. We therefore treat
+everything before 2024-01-01 as off limits and the placeholder 2023-06-01..2023-08-31 as the sealed window. All
+code refuses these dates for any label other than the judges' `holdout`.
 
 ## Events
 

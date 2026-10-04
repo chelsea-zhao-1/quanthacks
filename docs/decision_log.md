@@ -35,3 +35,11 @@ with the reason and what had been looked at.
   any deliverable; the test window is 2024-25; constants re-frozen from 2024-25 gap inputs before any 2024-25
   outcome is analysed. Full EDGAR text is allowed by Massive and added as a variant for 2024-25 only. The 2022-23
   outputs stay on disk, unused; the discovery constants file remains in Git history (commit 6c7ecdf).
+- **Sealed window defined from the notebook.** Cell 10: HOLDOUT placeholder 2023-06-01..2023-08-31; cell 48:
+  options history covers only the in-sample and out-of-sample windows, "do not move them earlier". Because the
+  earlier 2022-23 discovery window therefore overlapped the sealed placeholder, all 2022-23 outputs were moved to
+  an unused folder, the 2022-23 labels were retired in code (every module refuses them), and no 2022-23 result
+  appears in any deliverable. The 2022-23 analysis was exploratory and its results did not set any 2024-25
+  parameter: the hypothesis and test plan were committed before it, and the three amendments made afterwards
+  concerned input coverage, a log transform and the constants, based on input distributions only. The constants
+  are re-frozen from 2024-25 gap inputs.
