@@ -55,6 +55,10 @@ ordinary days from the whole sample):
 3. Option volume in the gap: total volume of the ATM pair over the gap sessions divided by its average over
    the 5 sessions before the gap.
 
+**Volume input in log form** (amended before any outcome was looked at: the raw ratio is heavy-tailed, with a
+95th percentile near 47 and a maximum near 1,600, so standardising it raw would let a few events dominate
+`M`): the volume input is `log(volume ratio)`; it is standardised like the others.
+
 **Coverage rules for the gap inputs** (amended before any outcome was looked at; the first draft required a
 fresh mark on the 1-month ATM pair at the gap start and five cached baseline sessions, which left 49 of 258
 late people-news events measurable because the cached strikes were chosen at the filing date):
