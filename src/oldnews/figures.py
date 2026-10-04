@@ -6,6 +6,8 @@
     4  equity_curve   the cash-secured put on old news: cumulative P&L at 1x and 2x costs against the same put on
                       matched ordinary days and on all late filings, and its drawdown
     5  walkthrough    one filing end to end: event date, gap, filing, entry, option-implied versus realised move
+    6  fig_method     for the note: the committed test in five boxes and a timeline (no data), 7.5 in wide, 200 dpi
+    7  fig_results    for the note: group means, H1 old minus surprise and the placebo in one row, 7.5 in wide, 200 dpi
 
 No statistic is recomputed here. Figures 1 to 3 plot results_<label>/profile.csv and profile_by_year.csv exactly as
 src/oldnews/tests.py wrote them (group means, the old-minus-surprise effect, its bootstrap 95% interval, the
@@ -436,6 +438,173 @@ def equity_curve(eq: pd.DataFrame, summary: pd.DataFrame | None = None, path: Pa
 
 
 # ---------------------------------------------------------------------------------------------------------
+# Note figures · the method in one strip, the result in one row (sized for a 6.5 in print column)
+# ---------------------------------------------------------------------------------------------------------
+NOTE_DPI = 200
+NOTE_MIN_PT = 9.25          # 9.25 pt on a 7.5 in figure prints at 8 pt in a 6.5 in column
+
+# The committed definitions (docs/test_plan.md), one box per step, with its width in inches. No data enters it.
+METHOD_STEPS = [
+    ("1  Events", "Late people 8-K\n(Item 5.02),\nTOP_100, 2024-25;\nevent date ≥ 1\nbusiness day\nbefore EDGAR\nacceptance", 1.46),
+    ("2  Score at entry", "Math M: gap move,\nimplied-vol change,\nlog option volume\nWords T: prior-\nannouncement cues\nin the filing\nS = M + T ≥ 1:\nold news, else\nsurprise", 1.44),
+    ("3  Measure", "y = log(RV / IV₀)\nover h sessions,\nminus matched\nordinary days:\nsame ticker, ±60\nsessions, > 5 from\nany 8-K", 1.38),
+    ("4  Test H1", "old − surprise < 0\nh = 10, 1-month\noptions, one-sided\npermutation test\n\nPlacebo P: late\nscheduled 8-Ks", 1.33),
+    ("5  Trade H2", "cash-secured put,\nstrike 3% below\nspot, 1-month,\nsold at t₀, held\n10 sessions, net\nof costs at 1x\nand 2x", 1.33),
+]
+
+
+def _fits(fig, text, box: tuple[float, float, float, float]) -> bool:
+    """Whether a text's rendered extent lies inside box (x0, y0, x1, y1) in figure inches."""
+    bb = text.get_window_extent(fig.canvas.get_renderer())
+    d = fig.dpi
+    return bb.x0 / d >= box[0] - 1e-3 and bb.x1 / d <= box[2] + 1e-3 and bb.y0 / d >= box[1] - 1e-3 and bb.y1 / d <= box[3] + 1e-3
+
+
+def fig_method(path: Path | None = None, source: str = "") -> plt.Figure:
+    """A data-free schematic of the committed test: five steps left to right, the timeline of one filing beneath.
+    Warns if any text spills out of its box or the figure."""
+    from matplotlib.patches import FancyArrowPatch, FancyBboxPatch
+
+    fs = NOTE_MIN_PT
+    W, H = 7.5, 3.0
+    fig = plt.figure(figsize=(W, H), dpi=NOTE_DPI)
+    fig.set_facecolor(SURFACE)
+    ax = fig.add_axes((0, 0, 1, 1))
+    ax.set_xlim(0, W)
+    ax.set_ylim(0, H)
+    ax.axis("off")
+    ax.text(0.06, H - 0.06, "The test, step by step: rules fixed before any 2024-25 outcome was seen", ha="left",
+            va="top", color=INK, fontsize=11.5, fontweight="bold")
+    texts = []                                   # (text, the box it must stay inside)
+    if source:
+        texts.append((ax.text(0.06, H - 0.32, source, ha="left", va="top", color=INK2, fontsize=fs), (0, 0, W, H)))
+
+    # the five boxes
+    gap = (W - 0.08 - sum(w for *_, w in METHOD_STEPS)) / (len(METHOD_STEPS) - 1)
+    by, bh, x = 0.88, 1.66, 0.04
+    for i, (head, body, bw) in enumerate(METHOD_STEPS):
+        primary = head.endswith("H1")            # the primary test, outlined a shade darker
+        ax.add_patch(FancyBboxPatch((x, by), bw, bh, boxstyle="round,pad=0,rounding_size=0.06", facecolor="white",
+                                    edgecolor=INK2 if primary else AXIS, linewidth=1.3 if primary else 0.9))
+        inside = (x, by, x + bw, by + bh)
+        texts.append((ax.text(x + 0.07, by + bh - 0.07, head, ha="left", va="top", color=INK, fontsize=fs,
+                              fontweight="bold"), inside))
+        for k, line in enumerate(body.split("\n")):     # one text per line: even spacing whatever the glyphs
+            texts.append((ax.text(x + 0.07, by + bh - 0.31 - k * 0.14, line, ha="left", va="top", color=INK2,
+                                  fontsize=fs), inside))
+        if i < len(METHOD_STEPS) - 1:
+            ax.add_patch(FancyArrowPatch((x + bw + 0.005, by + bh / 2), (x + bw + gap - 0.005, by + bh / 2),
+                                         arrowstyle="-|>", mutation_scale=8, color=INK2, linewidth=1))
+        x += bw + gap
+
+    # the timeline of one filing: spans named above the line, dates named below it
+    ly = 0.55
+    g0, ev, tpre, acc, t0, ex = 0.25, 0.55, 1.75, 3.05, 4.65, 6.85
+    ax.add_patch(FancyArrowPatch((0.06, ly), (W - 0.06, ly), arrowstyle="-|>", mutation_scale=8, color=MUTED,
+                                 linewidth=1))
+    ax.add_patch(plt.Rectangle((g0, ly - 0.05), tpre - g0, 0.10, facecolor=GRID, edgecolor="none", zorder=1))
+    ax.add_patch(plt.Rectangle((t0, ly - 0.05), ex - t0, 0.10, facecolor=OLD, alpha=0.3, edgecolor="none", zorder=1))
+    for mid, txt in (((g0 + tpre) / 2, "gap: scored for old news"), ((t0 + ex) / 2, "h sessions: measured and traded")):
+        texts.append((ax.text(mid, ly + 0.08, txt, ha="center", va="bottom", color=INK2, fontsize=fs), (0, 0, W, by)))
+    marks = [(ev, "event date"), (tpre, "t_pre: last close\nbefore acceptance"), (acc, "filing accepted\n(EDGAR time)"),
+             (t0, "entry t₀: first close after;\nnext session if after 15:30 ET"), (ex, "exit t₀ + h")]
+    for xm, txt in marks:
+        ax.plot([xm, xm], [ly - 0.08, ly + 0.08], color=INK, linewidth=1.2, zorder=3, solid_capstyle="butt")
+        texts.append((ax.text(xm, ly - 0.11, txt, ha="center", va="top", color=INK, fontsize=fs, linespacing=1.1),
+                      (0, 0, W, by)))
+
+    # nothing may spill out of its box, and the labels under the timeline may not touch each other
+    fig.canvas.draw()
+    for t, box in texts:
+        if not _fits(fig, t, box):
+            warnings.warn(f"fig_method: text {t.get_text()[:30]!r} spills out of its box")
+    under = sorted((t.get_window_extent() for t, _ in texts[-len(marks):]), key=lambda b: b.x0)
+    if any(a.x1 >= b.x0 for a, b in zip(under, under[1:])):
+        warnings.warn("fig_method: timeline labels overlap")
+    if path:
+        fig.savefig(path, dpi=NOTE_DPI, facecolor=SURFACE)
+    return fig
+
+
+def _note_x() -> np.ndarray:
+    """Horizon positions, expiry set a little apart: it is a date, not a session count."""
+    return np.r_[np.arange(len(HORIZONS) - 1), len(HORIZONS) - 0.3]
+
+
+def _note_axis(ax, t: pd.DataFrame, x: np.ndarray) -> None:
+    """Horizon ticks (exp = expiry, set apart), a zero line, and the primary horizon shaded."""
+    ax._xlabelsize = NOTE_MIN_PT
+    ax.set_xticks(x, ["exp" if h == "expiry" else h for h in t.index])
+    ax.set_xlim(x[0] - 0.6, x[-1] + 0.6)
+    ax.axhline(0, color=MUTED, linewidth=0.8, zorder=1)
+    i = x[HORIZONS.index(PRIMARY_H)]
+    ax.axvspan(i - 0.4, i + 0.4, color=GRID, alpha=0.7, linewidth=0, zorder=0)
+
+
+def _effect_note(t: pd.DataFrame, sided: str) -> str:
+    """The primary cell as the table states it: effect [95% interval], then the p-value. Read from the profile,
+    never typed."""
+    r = t.loc[PRIMARY_H]
+    if not np.isfinite(r["effect"]):
+        return f"h = {PRIMARY_H}: no events"
+    return f"{r['effect']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}]\nh = {PRIMARY_H}, {sided} p = {r['p']:.2f}"
+
+
+def fig_results(h1: pd.DataFrame, p: pd.DataFrame, path: Path | None = None, source: str = "") -> plt.Figure:
+    """h1, p: from_profile(profile, "H1") and from_profile(profile, "P"). (a) group means, (b) H1 old minus
+    surprise with its bootstrap 95% interval, (c) the same on the placebo; (b) and (c) share a y-axis."""
+    x = _note_x()
+    fs = NOTE_MIN_PT
+    fig = plt.figure(figsize=(7.5, 3.0), dpi=NOTE_DPI)
+    gs = fig.add_gridspec(1, 5, wspace=0, width_ratios=[1, 0.30, 1, 0.07, 1])   # room for (b)'s y-axis only
+    a, b = fig.add_subplot(gs[0]), fig.add_subplot(gs[2])
+    c = fig.add_subplot(gs[4], sharey=b)
+    kw = dict(linewidth=1.6, markersize=4.5, markeredgecolor=SURFACE, markeredgewidth=1, zorder=3)
+    a.plot(x, h1["mean_old"].to_numpy(float), color=OLD, marker="o", label="old news", **kw)
+    a.plot(x, h1["mean_comp"].to_numpy(float), color=SURPRISE, marker="s", label="surprise news", **kw)
+    i = x[HORIZONS.index(PRIMARY_H)]
+    for ax, t, sided in ((b, h1, "one-sided"), (c, p, "two-sided")):
+        lo, hi = t["ci_lo"].to_numpy(float), t["ci_hi"].to_numpy(float)
+        ax.fill_between(x, lo, hi, color=INK2, alpha=0.12, linewidth=0, zorder=2)
+        ax.vlines(x, lo, hi, color=INK2, linewidth=1, zorder=2)
+        ax.plot(x, t["effect"].to_numpy(float), color=INK2, marker="o", **kw)
+        ax.plot([i], [t.loc[PRIMARY_H, "effect"]], marker="o", markersize=6.5, color=INK, markeredgecolor=SURFACE,
+                markeredgewidth=1, zorder=4)
+        ax.text(0.03, 0.97, _effect_note(t, sided), transform=ax.transAxes, ha="left", va="top", fontsize=fs,
+                color=INK, linespacing=1.2, bbox=LABEL_BOX, zorder=5)
+    for ax, title in ((a, "(a) Mean by group"), (b, "(b) Old − surprise (H1)"), (c, "(c) Placebo (P)")):
+        _note_axis(ax, h1, x)
+        style(ax, "", "horizon, sessions", "")
+        ax.set_title(title, loc="left", color=INK, fontsize=fs + 0.75, fontweight="bold", pad=5)
+        ax.tick_params(labelsize=fs)
+        ax.xaxis.label.set_size(fs)
+    a.set_ylabel("log(RV / IV₀) vs ordinary days", color=INK2, fontsize=fs)
+    b.set_ylabel("old − surprise", color=INK2, fontsize=fs)
+    c.tick_params(labelleft=False)
+    a.legend(frameon=False, labelcolor=INK2, fontsize=fs, loc="upper right", handlelength=1.3, borderaxespad=0.1,
+             labelspacing=0.3)
+    span = np.nanmax(np.r_[h1["mean_old"], h1["mean_comp"]]) - np.nanmin(np.r_[h1["mean_old"], h1["mean_comp"]])
+    a.set_ylim(np.nanmin(np.r_[h1["mean_old"], h1["mean_comp"]]) - 0.08 * span,
+               np.nanmax(np.r_[h1["mean_old"], h1["mean_comp"]]) + 0.45 * span)    # room for the legend
+    lo = np.nanmin(np.r_[h1["ci_lo"].to_numpy(float), p["ci_lo"].to_numpy(float)])
+    hi = np.nanmax(np.r_[h1["ci_hi"].to_numpy(float), p["ci_hi"].to_numpy(float)])
+    b.set_ylim(lo - 0.05 * (hi - lo), hi + 0.45 * (hi - lo))       # room at the top for the note
+    empty = [h for h in HORIZONS if not h1.loc[h, "n"] > 0]       # n = 0: the 1-month option expired first
+    fig.suptitle("Old news does not fade more than surprise news", x=0.01, y=0.985, ha="left", va="top", color=INK,
+                 fontsize=11.5, fontweight="bold")
+    fig.text(0.01, 0.895, "Late people 8-Ks, 1-month options. Outcome log(RV / IV₀), each event minus its matched "
+             f"ordinary days.\nPrediction (H1): old below surprise. Shaded: primary h = {PRIMARY_H}. Bands: bootstrap 95%."
+             + (f" {', '.join(empty)}: no events." if empty else ""),
+             ha="left", va="top", color=INK2, fontsize=fs, linespacing=1.3)
+    if source:
+        fig.text(0.01, 0.015, source, ha="left", va="bottom", color=MUTED, fontsize=fs - 1)
+    fig.subplots_adjust(left=0.085, right=0.995, top=0.66, bottom=0.22 if source else 0.16)
+    if path:
+        fig.savefig(path, dpi=NOTE_DPI, facecolor=SURFACE)
+    return fig
+
+
+# ---------------------------------------------------------------------------------------------------------
 # All of them
 # ---------------------------------------------------------------------------------------------------------
 def make_all(data: Inputs, folder: Path, label: str, title_suffix: str = "",
@@ -450,7 +619,8 @@ def make_all(data: Inputs, folder: Path, label: str, title_suffix: str = "",
     folder.mkdir(parents=True, exist_ok=True)
     h1, pl = from_profile(data.profile, "H1"), from_profile(data.profile, "P")
     tail = f" · {title_suffix}" if title_suffix else ""
-    path = {n: folder / f"{n}.png" for n in ("fade_curve", "placebo", "by_year", "equity_curve", "walkthrough")}
+    path = {n: folder / f"{n}.png" for n in ("fade_curve", "placebo", "by_year", "equity_curve", "walkthrough",
+                                             "fig_method", "fig_results")}
     figs = {"fade_curve": fade_curve(h1, path["fade_curve"],
                                      "Late executive and director 8-Ks, earnings excluded, 1-month options. Prediction: old "
                                      "news below surprise news.\nBelow zero: realised volatility fell short of implied by more "
@@ -468,6 +638,9 @@ def make_all(data: Inputs, folder: Path, label: str, title_suffix: str = "",
                                             f"$0.05 per share) each way.\nFrom trade/equity.csv and summary.csv (trade.py){tail}")
     if walk is not None and len(walk[1].dropna()):
         figs["walkthrough"] = walkthrough(walk[0], walk[1], path["walkthrough"], note=walk_note)
+    figs["fig_method"] = fig_method(path["fig_method"], "Rules: docs/test_plan.md (committed 2026-10-03)")
+    figs["fig_results"] = fig_results(h1, pl, path["fig_results"],
+                                      f"From results/profile.csv (tests.py){tail}")
     out = {}
     for name, fig in figs.items():
         out[name] = path[name]
