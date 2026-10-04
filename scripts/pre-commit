@@ -1,0 +1,25 @@
+#!/bin/sh
+# Blocks commits that could leak the API key or licensed data (CLAUDE.md rules 1-2, 5-6).
+PY=".venv/Scripts/python.exe"; [ -x "$PY" ] || PY=python
+exec "$PY" - <<'PYEOF'
+import json, re, subprocess, sys
+staged = subprocess.run(["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"],
+                        capture_output=True, text=True).stdout.split()
+bad = [f for f in staged if f == ".env" or f.startswith((".massive_cache/", "data/")) or f.endswith(".env")]
+if bad:
+    sys.exit("pre-commit: refusing forbidden paths: " + ", ".join(bad))
+diff = subprocess.run(["git", "diff", "--cached", "-U0"], capture_output=True, text=True,
+                      encoding="utf-8", errors="ignore").stdout
+key = re.compile(r"(?i)(api[_-]?key|apikey|massive_api_key|polygon_api_key|authorization|bearer)\W{0,4}[=:]\s*['\"]?[A-Za-z0-9_\-]{16,}")
+hits = [l for l in diff.splitlines() if l.startswith("+") and key.search(l)]
+if hits:
+    sys.exit(f"pre-commit: {len(hits)} added line(s) look like a credential; not shown. Remove them and retry.")
+for f in staged:
+    if f.endswith(".ipynb"):
+        nb = json.loads(subprocess.run(["git", "show", f":{f}"], capture_output=True, text=True,
+                                       encoding="utf-8").stdout)
+        dirty = [i for i, c in enumerate(nb["cells"]) if c.get("cell_type") == "code"
+                 and (c.get("outputs") or c.get("execution_count") is not None)]
+        if dirty:
+            sys.exit(f"pre-commit: {f} has outputs in {len(dirty)} cell(s); clear them first.")
+PYEOF

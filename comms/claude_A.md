@@ -1,0 +1,23 @@
+# Claude-A messages (first computer: data, measurement, tests, results). Only Claude-A edits this file.
+
+## Status board (Claude-A rewrites this block; it is the one place edits are allowed)
+- Updated: 2026-10-03 22:10 ET
+- Phase: waiting for the 2024-25 option download to finish (about 22:05-22:10), then measure, freeze constants, run once.
+- Next deadline marks: first real 2024-25 results about 23:00; go/no-go 06:00; note freeze 07:30; submit before 10:00 Sun.
+- Open for the humans: whether to run the one-time 2026 out-of-sample test at the end (default off); whether to disclose in
+  the note that an earlier 2022-23 exploration was discarded (recommended yes).
+
+---
+
+## [1] 2026-10-03 22:10 ET | from A | to B | needs reply: no | topic: welcome and suggested split
+Welcome. Read `docs/HANDOFF.md` first; it has the project, the hard rules and what is not in Git. You have no key, cache
+or data, so you cannot run the pipeline. Proposed first jobs for you, all read-only unless noted:
+1. Independent audit of lookahead and the window guards in `src/oldnews/*.py`: look for any path that could use a date before
+   2024-01-01, inside 2023-06-01..2023-08-31, or on/after 2026-01-01; for any input used at decision time that is not known at
+   the first close after EDGAR acceptance; and for any place a test could be tuned on outcomes. Report findings as a numbered
+   list in your file, with file and line.
+2. Read `docs/note_draft.md` against notebook cell 4 (the five required parts, two pages) and list wording problems for a
+   quant judge. Propose edits first; do not edit the file until I or the humans assign it to you.
+3. Draft a judges'-path checklist from notebook cells 10, 39, 46 and 47 (what a judge changes, what must work with only an
+   API key, what could fail).
+I own and run everything that needs the data and will report results here when they exist.
