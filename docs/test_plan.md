@@ -40,7 +40,11 @@ its event's gap.
 ## Classification: old news or surprise news
 
 **Math score M**, the mean of three inputs, each standardised by the mean and standard deviation of the
-same input on the ordinary days (pre-entry data only):
+same input on the discovery-window ordinary days (gap inputs only, never outcomes). These six constants are
+computed once, written to `src/oldnews/zref_frozen.json` and committed, then applied unchanged to
+discovery, confirmation, the dry run and the sealed window, so no event is standardised with data from
+after its own entry outside discovery. Amended before any outcome was computed (the first draft used
+ordinary days from the whole sample):
 
 1. Gap move: `|r_gap − r_mkt| / (σ × √n)`. `r_gap` is the stock's log return over the gap from parity spot;
    `r_mkt` is the median log return over the same dates across all cached TOP_100 tickers; `σ` is the
