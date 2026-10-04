@@ -1,6 +1,6 @@
 # Handoff for a second Claude (CHELSEAS COMPUTER)
 
-Read this first, then `comms/README.md`. Written 2026-10-03 about 22:10 ET. Deadline: **Sun 2026-10-04, 10:00 AM ET**
+Read this first, then `comms/README.md`. Written 2026-10-03 about 22:10 ET. Deadline: **team target 9:30 AM, 10:00 AM at the latest, Sun 2026-10-04** (official: 11:00 AM)
 (Devpost and final code push); judges do not review later commits.
 
 ## The project
