@@ -1,13 +1,17 @@
 """Figures for the old-news test, in the notebook's own style (section 7 palette and axes).
 
     1  fade_curve     the outcome by horizon: old and surprise news, and old minus surprise with its 95% interval
-    2  walkthrough    one filing end to end: event date, gap, filing, entry, option-implied versus realised move
-    3  placebo        old minus surprise for the people-news filings, next to the same on the placebo filings
+    2  placebo        old minus surprise for the people-news filings, next to the same on the placebo filings
+    3  by_year        the same, split by the calendar year of entry (2024 and 2025)
+    4  equity_curve   the cash-secured put on old news: cumulative P&L at 1x and 2x costs against the same put on
+                      matched ordinary days and on all late filings, and its drawdown
+    5  walkthrough    one filing end to end: event date, gap, filing, entry, option-implied versus realised move
 
-Nothing is recomputed here. Figures 1 and 3 plot results_<label>/profile.csv exactly as src/oldnews/tests.py wrote
-it (group means, the old-minus-surprise effect, its bootstrap 95% interval, the permutation p-value and the
-Benjamini-Hochberg q). That table has an interval for the difference only, so the group means are drawn without
-bands. The outcome is Y_h = log(RV_h / IV_0), each event minus the mean of its matched ordinary days; below zero
+No statistic is recomputed here. Figures 1 to 3 plot results_<label>/profile.csv and profile_by_year.csv exactly as
+src/oldnews/tests.py wrote them (group means, the old-minus-surprise effect, its bootstrap 95% interval, the
+permutation p-value and the Benjamini-Hochberg q); figure 4 plots trade_<label>/equity.csv and quotes
+trade_<label>/summary.csv (its drawdown is the curve's own running peak-to-trough, checked against the table). The
+profile has an interval for the difference only, so the group means are drawn without bands. The outcome is Y_h = log(RV_h / IV_0), each event minus the mean of its matched ordinary days; below zero
 means realised volatility fell short of implied by more than on that stock's ordinary days. Horizons 42 and 63
 sessions have no observations in the 1-month bucket (the option expires first); they stay on the axis, marked
 n = 0, because the fixed horizons are reported in full.
@@ -21,6 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import warnings
+
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
@@ -32,6 +38,7 @@ PRIMARY_H, PRIMARY_BUCKET, PRIMARY_OTM = "10", "1m", 3
 # The notebook's tokens (section 7), so these figures sit beside its own.
 INK, INK2, MUTED, GRID, AXIS, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb"
 OLD, SURPRISE = "#2a78d6", "#eb6834"          # categorical slots 1 and 2 (validated: CVD dE 24.7, contrast >= 3:1)
+YEARS = {"2024": ("#4a3aa7", "o"), "2025": ("#1baf7a", "s")}   # categorical slots 7 and 3 (validated: CVD dE 26.6); marker is the second cue
 LABEL_BOX = dict(boxstyle="square,pad=0.15", facecolor=SURFACE, edgecolor="none")
 
 
@@ -43,6 +50,9 @@ class Inputs:
     classified: pd.DataFrame | None = None
     outcome: pd.DataFrame | None = None
     nulls: pd.DataFrame | None = None
+    profile_by_year: pd.DataFrame | None = None     # results_<label>/profile_by_year.csv
+    equity: pd.DataFrame | None = None              # trade_<label>/equity.csv
+    trade_summary: pd.DataFrame | None = None       # trade_<label>/summary.csv
 
 
 def flag(s: pd.Series) -> pd.Series:
@@ -70,10 +80,23 @@ def read_tables(label: str, data_dir: Path) -> Inputs:
     pipeline.check_label(label)
     d = Path(data_dir)
     kw = dict(keep_default_na=False, na_values=["", "nan", "NaN"])
-    return Inputs(profile=pd.read_csv(d / f"results_{label}" / "profile.csv", dtype={"horizon": str}, **kw),
+    data = Inputs(profile=pd.read_csv(d / f"results_{label}" / "profile.csv", dtype={"horizon": str}, **kw),
                   classified=pd.read_csv(d / f"classified_{label}.csv", **kw),
                   outcome=primary_rows(pd.read_csv(d / f"outcome_{label}.csv", **kw)),
                   nulls=pd.read_csv(d / f"nulls_{label}.csv", **kw))
+    return attach_files(data, d, label)
+
+
+def attach_files(data: Inputs, data_dir: Path, label: str) -> Inputs:
+    """Add the tables the year split and the equity figure plot, when the run wrote them."""
+    d = Path(data_dir)
+    kw = dict(keep_default_na=False, na_values=["", "nan", "NaN"], dtype={"horizon": str})
+    files = {"profile_by_year": d / f"results_{label}" / "profile_by_year.csv",
+             "equity": d / f"trade_{label}" / "equity.csv", "trade_summary": d / f"trade_{label}" / "summary.csv"}
+    for name, path in files.items():
+        if path.exists() and getattr(data, name) is None:
+            setattr(data, name, pd.read_csv(path, **kw))
+    return data
 
 
 def primary_rows(outcome: pd.DataFrame) -> pd.DataFrame:
@@ -122,6 +145,7 @@ def style(ax, title: str = "", xlabel: str = "", ylabel: str = "") -> None:
     ax.grid(axis="y", color=GRID, linewidth=0.8)
     ax.set_axisbelow(True)
     ax.tick_params(colors=INK2, labelsize=9, length=0)
+    ax.tick_params(axis="x", labelsize=getattr(ax, "_xlabelsize", 9))
     if title:
         ax.set_title(title, loc="left", color=INK, fontsize=11, fontweight="bold", pad=10)
     ax.set_xlabel(xlabel, color=INK2, fontsize=9)
@@ -129,10 +153,11 @@ def style(ax, title: str = "", xlabel: str = "", ylabel: str = "") -> None:
 
 
 def _under_title(ax, note: str) -> None:
-    """A one-line note between a panel's title and its plot area, where no data can collide with it."""
-    ax.set_title(ax.get_title(loc="left"), loc="left", color=INK, fontsize=11, fontweight="bold", pad=24)
-    ax.annotate(note, (0, 1), xycoords="axes fraction", xytext=(0, 7), textcoords="offset points", ha="left",
-                va="bottom", fontsize=8.5, color=INK2)
+    """A note (one or two lines) between a panel's title and its plot area, where no data can collide with it."""
+    lines = note.count("\n") + 1
+    ax.set_title(ax.get_title(loc="left"), loc="left", color=INK, fontsize=11, fontweight="bold", pad=12 + 12 * lines)
+    ax.annotate(note, (0, 1), xycoords="axes fraction", xytext=(0, 6), textcoords="offset points", ha="left",
+                va="bottom", fontsize=8.5, color=INK2, linespacing=1.35)
 
 
 def _headline(fig, title: str, subtitle: str) -> float:
@@ -143,18 +168,22 @@ def _headline(fig, title: str, subtitle: str) -> float:
     return 1 - (0.36 + 0.21 * (subtitle.count("\n") + 1) - 0.25) / h     # tight_layout adds its own padding
 
 
-def _tick_labels(t: pd.DataFrame, second: str, third: str) -> list[str]:
+def _tick_labels(t: pd.DataFrame, sizes: bool = True) -> list[str]:
     """Horizon on the first line, the group sizes under it (n = 0 where the 1-month option has expired)."""
     labels = []
     for h, r in t.iterrows():
+        name = "exp" if h == "expiry" else h
+        if not sizes:
+            labels.append(name)
+            continue
         n_old, n_comp = r["n_old"], r["n_comp"]
-        sizes = "n = 0" if not np.isfinite(r["n"]) or r["n"] == 0 else f"{int(n_old)}|{int(n_comp)}"
-        labels.append(f"{'exp' if h == 'expiry' else h}\n{sizes}")
+        labels.append(f"{name}\n" + ("n = 0" if not np.isfinite(r["n"]) or r["n"] == 0 else f"{int(n_old)}|{int(n_comp)}"))
     return labels
 
 
-def _horizon_axis(ax, x: np.ndarray, t: pd.DataFrame, primary: bool = True) -> None:
-    ax.set_xticks(x, _tick_labels(t, "old", "surprise"))
+def _horizon_axis(ax, x: np.ndarray, t: pd.DataFrame, primary: bool = True, sizes: bool = True) -> None:
+    ax._xlabelsize = 7.3 if sizes else 9           # style() applies it after the ticks are set
+    ax.set_xticks(x, _tick_labels(t, sizes))
     ax.axhline(0, color=MUTED, linewidth=0.8, zorder=1)
     if primary:
         i = HORIZONS.index(PRIMARY_H)
@@ -163,20 +192,26 @@ def _horizon_axis(ax, x: np.ndarray, t: pd.DataFrame, primary: bool = True) -> N
                     textcoords="offset points", ha="center", va="top", fontsize=8, color=INK2)
 
 
-def _line(ax, x, mean, color: str, label: str = "", lo=None, hi=None) -> None:
+def _line(ax, x, mean, color: str, label: str = "", lo=None, hi=None, marker: str = "o", band: bool = True) -> None:
     if lo is not None:
-        ax.fill_between(x, lo, hi, color=color, alpha=0.12, linewidth=0, zorder=2)
+        if band:
+            ax.fill_between(x, lo, hi, color=color, alpha=0.12, linewidth=0, zorder=2)
         ax.vlines(x, lo, hi, color=color, linewidth=1.2, zorder=2)
-    ax.plot(x, mean, color=color, linewidth=2, marker="o", markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.5,
+    ax.plot(x, mean, color=color, linewidth=2, marker=marker, markersize=7, markeredgecolor=SURFACE, markeredgewidth=1.5,
             solid_capstyle="round", solid_joinstyle="round", label=label, zorder=3)
 
 
-def _primary_note(t: pd.DataFrame) -> str:
+def _primary_note(t: pd.DataFrame, predicted: str = "negative", sided: str = "one-sided") -> str:
+    """The primary cell in two lines, as the table states it: the effect with its interval, the p-value, and the
+    prediction against what was observed (the sign, for a directional prediction). No judgement beyond that."""
     r = t.loc[PRIMARY_H]
     if not np.isfinite(r["effect"]):
         return ""
-    note = f"h = {PRIMARY_H}: {r['effect']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}], p = {r['p']:.4f}"
-    return note + (f", BH q = {r['q_bh']:.3f}" if np.isfinite(r["q_bh"]) else "")
+    first = f"h = {PRIMARY_H}: {r['effect']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}]"
+    second = f"{sided} p = {r['p']:.4f}" + (f", BH q = {r['q_bh']:.3f}" if np.isfinite(r["q_bh"]) else "")
+    seen = "positive" if r["effect"] > 0 else "negative"
+    second += f"; predicted {predicted}" + (f", observed {seen}" if predicted in ("negative", "positive") else "")
+    return first + "\n" + second
 
 
 # ---------------------------------------------------------------------------------------------------------
@@ -185,20 +220,21 @@ def _primary_note(t: pd.DataFrame) -> str:
 def fade_curve(h1: pd.DataFrame, path: Path | None = None, subtitle: str = "") -> plt.Figure:
     """h1: from_profile(profile, "H1")."""
     x = np.arange(len(HORIZONS))
-    fig, (a, b) = plt.subplots(1, 2, figsize=(12.5, 5.2), gridspec_kw={"width_ratios": [1, 1]})
+    fig, (a, b) = plt.subplots(1, 2, figsize=(10.4, 4.9), gridspec_kw={"width_ratios": [1, 1]})
     # left: where each group sits
     _line(a, x, h1["mean_old"].to_numpy(float), OLD, "Old news")
     _line(a, x, h1["mean_comp"].to_numpy(float), SURPRISE, "Surprise news")
     _horizon_axis(a, x, h1)
-    style(a, "Mean outcome by group", "sessions after entry (exp = option expiry); events: old | surprise",
+    style(a, "Mean outcome by group", "sessions after entry (exp = expiry); events: old | surprise",
           "log(realised / implied vol), event minus ordinary days")
     a.legend(frameon=False, labelcolor=INK2, fontsize=9, loc="lower right")
+    _under_title(a, "event Y minus the mean Y of its matched ordinary days\n(the stats table gives an interval for the difference only)")
     # right: the tested difference with its interval
     _line(b, x, h1["effect"].to_numpy(float), INK2, "", h1["ci_lo"].to_numpy(float), h1["ci_hi"].to_numpy(float))
     _horizon_axis(b, x, h1)
-    style(b, "Old minus surprise, 95% interval", "sessions after entry (exp = option expiry); events: old | surprise",
+    style(b, "Old minus surprise, 95% interval", "sessions after entry (exp = expiry); events: old | surprise",
           "difference in log(realised / implied vol)")
-    _under_title(b, _primary_note(h1))
+    _under_title(b, _primary_note(h1, "negative", "one-sided"))
     top = _headline(fig, "The fade curve: does old news over-price the move?",
                     subtitle or "Late executive and director 8-Ks, 1-month options. Prediction: old news below surprise news.")
     fig.tight_layout(rect=(0, 0, 1, top))
@@ -219,7 +255,7 @@ def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horiz
     """Price path through the gap and the filing, then the option-implied +/-1 sigma cone against what happened."""
     spot = spot.dropna()
     t0, t_pre, g0 = pd.Timestamp(row["t_0"]), pd.Timestamp(row["t_pre"]), pd.Timestamp(row["gap_start"])
-    fig, ax = plt.subplots(figsize=(11, 5.6))
+    fig, ax = plt.subplots(figsize=(10.0, 5.4))
     style(ax, xlabel="", ylabel="stock price from put-call parity ($)")
 
     ax.axvspan(g0, t_pre, color=GRID, alpha=0.6, linewidth=0, zorder=0)
@@ -289,16 +325,14 @@ def walkthrough(row: pd.Series, spot: pd.Series, path: Path | None = None, horiz
 def placebo(h1: pd.DataFrame, p: pd.DataFrame, path: Path | None = None, subtitle: str = "") -> plt.Figure:
     """h1, p: from_profile(profile, "H1") and from_profile(profile, "P")."""
     x = np.arange(len(HORIZONS))
-    fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.0), sharey=True)
-    for ax, t, title, sided in ((axes[0], h1, "People-news 8-Ks (test H1)", "one-sided"),
-                                (axes[1], p, "Placebo: late scheduled 8-Ks (test P)", "two-sided")):
+    fig, axes = plt.subplots(1, 2, figsize=(10.4, 4.7), sharey=True)
+    for ax, t, title, sided, pred in ((axes[0], h1, "People-news 8-Ks (test H1)", "one-sided", "negative"),
+                                      (axes[1], p, "Placebo: late scheduled 8-Ks (test P)", "two-sided", "no difference")):
         _line(ax, x, t["effect"].to_numpy(float), INK2, "", t["ci_lo"].to_numpy(float), t["ci_hi"].to_numpy(float))
         _horizon_axis(ax, x, t)
-        style(ax, title, "sessions after entry (exp = option expiry); events: old | surprise",
+        style(ax, title, "sessions after entry (exp = expiry); events: old | surprise",
               "old minus surprise, log(RV / IV₀)" if ax is axes[0] else "")
-        r = t.loc[PRIMARY_H]
-        _under_title(ax, f"h = {PRIMARY_H}: {r['effect']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}], "
-                         f"{sided} p = {r['p']:.4f}")
+        _under_title(ax, _primary_note(t, pred, sided))
     top = _headline(fig, "The placebo: the same split on filings that carry no people news",
                     subtitle or "Prediction: negative on the left, about zero on the right.")
     fig.tight_layout(rect=(0, 0, 1, top))
@@ -308,12 +342,107 @@ def placebo(h1: pd.DataFrame, p: pd.DataFrame, path: Path | None = None, subtitl
 
 
 # ---------------------------------------------------------------------------------------------------------
-# All three
+# Figure 4 · the year split
+# ---------------------------------------------------------------------------------------------------------
+def by_year(prof_y: pd.DataFrame, path: Path | None = None, subtitle: str = "") -> plt.Figure:
+    """prof_y: results_<label>/profile_by_year.csv (the stats module's own per-year horizon profile)."""
+    x = np.arange(len(HORIZONS))
+    periods = sorted(str(p) for p in prof_y["period"].unique())
+    fig, axes = plt.subplots(1, 2, figsize=(10.4, 4.7), sharey=True)
+    for ax, test, title, sided, pred in ((axes[0], "H1", "People-news 8-Ks (test H1)", "one-sided", "negative"),
+                                         (axes[1], "P", "Placebo: late scheduled 8-Ks (test P)", "two-sided", "no difference")):
+        notes = []
+        for k, period in enumerate(periods):
+            t = from_profile(prof_y[prof_y["period"].astype(str) == period], test)
+            color, marker = YEARS.get(period, (INK2, "o"))
+            dx = (k - (len(periods) - 1) / 2) * 0.22
+            r = t.loc[PRIMARY_H]
+            _line(ax, x + dx, t["effect"].to_numpy(float), color,
+                  f"{period}: {int(r['n_old'])} old | {int(r['n_comp'])} surprise at h = {PRIMARY_H}",
+                  t["ci_lo"].to_numpy(float), t["ci_hi"].to_numpy(float), marker=marker, band=False)
+            notes.append(f"{period}: {r['effect']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}], {sided} p = {r['p']:.3f}")
+        _horizon_axis(ax, x, t, sizes=False)
+        style(ax, title, "sessions after entry (exp = expiry); no events at 42 and 63",
+              "old minus surprise, log(RV / IV₀)" if ax is axes[0] else "")
+        ax.legend(frameon=False, labelcolor=INK2, fontsize=8.5, loc="lower right")
+        _under_title(ax, f"h = {PRIMARY_H} by year of entry; predicted {pred}\n" + "\n".join(notes))
+    top = _headline(fig, "The same split, by calendar year of entry",
+                    subtitle or "Each year run on its own with the same rules; bars are bootstrap 95% intervals.")
+    fig.tight_layout(rect=(0, 0, 1, top))
+    if path:
+        fig.savefig(path, dpi=160, facecolor=SURFACE)
+    return fig
+
+
+# ---------------------------------------------------------------------------------------------------------
+# Figure 5 · the trade
+# ---------------------------------------------------------------------------------------------------------
+def _drawdown(mtm_pct: pd.Series) -> pd.Series:
+    """Running peak-to-trough of the book's value, in %: wealth = 1 + cumulative return, as trade.max_drawdown."""
+    wealth = 1 + mtm_pct.to_numpy(float) / 100
+    peak = np.maximum.accumulate(np.r_[1.0, wealth])[1:]
+    return pd.Series(100 * (wealth / peak - 1), index=mtm_pct.index)
+
+
+def equity_curve(eq: pd.DataFrame, summary: pd.DataFrame | None = None, path: Path | None = None,
+                 subtitle: str = "", horizon: str = PRIMARY_H) -> plt.Figure:
+    """eq: trade_<label>/equity.csv; summary: trade_<label>/summary.csv (totals and drawdowns are quoted from it)."""
+    eq = eq.assign(date=pd.to_datetime(eq["date"]), horizon=eq["horizon"].map(norm_h))
+    eq = eq[eq["horizon"] == horizon]
+    summ = None
+    if summary is not None:
+        summ = summary.assign(horizon=summary["horizon"].map(norm_h))
+        summ = summ[summ["horizon"] == horizon].set_index(["book", "cost"])
+
+    def quote(book: str, cost: str, what: str) -> str:
+        if summ is None or (book, cost) not in summ.index:
+            return ""
+        v = summ.loc[(book, cost), what]
+        return f" ({v:+.2f}%)" if what == "total_return_pct" else f"{v:.2f}%"
+
+    fig, (a, b) = plt.subplots(2, 1, figsize=(8.8, 5.9), sharex=True, gridspec_kw={"height_ratios": [2.3, 1]})
+    spec = [("old", "1x", "Old news, costs 1x", OLD, "-", 2.2), ("old", "2x", "Old news, costs 2x (double)", OLD, "--", 1.8),
+            ("null_r1", "1x", "Same put on matched ordinary days", MUTED, "-", 1.2), ("null_r2", "1x", None, MUTED, "-", 1.2),
+            ("all_late", "1x", "Same put on all late people-news filings", INK2, ":", 1.6)]
+    for book, cost, label, color, ls, lw in spec:
+        d = eq[(eq["book"] == book) & (eq["cost"] == cost)].sort_values("date")
+        if d.empty:
+            continue
+        name = None if label is None else label + quote(book, cost, "total_return_pct")
+        a.step(d["date"], d["mtm_pct"], where="post", color=color, linestyle=ls, linewidth=lw, label=name, zorder=3 if book == "old" else 2)
+        if book == "old":
+            dd = _drawdown(d["mtm_pct"])
+            b.step(d["date"], dd, where="post", color=color, linestyle=ls, linewidth=lw, zorder=3,
+                   label=f"Old news, costs {cost}: max {dd.min():.2f}%")
+            if summ is not None and (book, cost) in summ.index:
+                table_dd = float(summ.loc[(book, cost), "max_dd_mtm_pct"])
+                if abs(table_dd - dd.min()) > 0.05:
+                    warnings.warn(f"drawdown from the curve ({dd.min():.2f}%) differs from the table ({table_dd:.2f}%)")
+    a.axhline(0, color=MUTED, linewidth=0.8, zorder=1)
+    b.axhline(0, color=MUTED, linewidth=0.8, zorder=1)
+    style(a, "", "", "cumulative P&L, % of collateral (marked)")
+    style(b, "", "", "drawdown, %")
+    a.legend(frameon=False, labelcolor=INK2, fontsize=8.5, loc="upper left")
+    b.legend(frameon=False, labelcolor=INK2, fontsize=8.5, loc="lower left")
+    b.xaxis.set_major_locator(mdates.AutoDateLocator(maxticks=8))
+    b.xaxis.set_major_formatter(mdates.DateFormatter("%b %Y"))
+    top = _headline(fig, f"The trade: a cash-secured put on old-news filings, {horizon}-session hold",
+                    subtitle or "Strike 3% below spot, 1-month options, at most 5 positions open; costs max(5% of premium, $0.05 "
+                                "per share) on entry and exit.")
+    fig.tight_layout(rect=(0, 0, 1, top))
+    if path:
+        fig.savefig(path, dpi=160, facecolor=SURFACE)
+    return fig
+
+
+# ---------------------------------------------------------------------------------------------------------
+# All of them
 # ---------------------------------------------------------------------------------------------------------
 def make_all(data: Inputs, folder: Path, label: str, title_suffix: str = "",
              walk: tuple[pd.Series, pd.Series] | None = None, walk_note: str = "", show: bool = False) -> dict[str, Path]:
-    """Write the three figures for `label` to `folder`; return name -> path. The profile is the only source of the
-    first two. Refuses the retired labels (discovery, dryrun): nothing is drawn from 2022-2023."""
+    """Write the figures for `label` to `folder`; return name -> path. The profile is the only source of the first
+    two; the year split and the equity curve are drawn when their tables exist. Refuses the retired labels
+    (discovery, dryrun): nothing is drawn from 2022-2023."""
     from oldnews import pipeline
 
     pipeline.check_label(label)
@@ -321,15 +450,22 @@ def make_all(data: Inputs, folder: Path, label: str, title_suffix: str = "",
     folder.mkdir(parents=True, exist_ok=True)
     h1, pl = from_profile(data.profile, "H1"), from_profile(data.profile, "P")
     tail = f" · {title_suffix}" if title_suffix else ""
-    path = {n: folder / f"{n}.png" for n in ("fade_curve", "placebo", "walkthrough")}
+    path = {n: folder / f"{n}.png" for n in ("fade_curve", "placebo", "by_year", "equity_curve", "walkthrough")}
     figs = {"fade_curve": fade_curve(h1, path["fade_curve"],
                                      "Late executive and director 8-Ks, earnings excluded, 1-month options. Prediction: old "
                                      "news below surprise news.\nBelow zero: realised volatility fell short of implied by more "
                                      "than on the same stock's ordinary days.\n"
                                      f"From results/profile.csv (tests.py); bands: bootstrap 95%{tail}"),
             "placebo": placebo(h1, pl, path["placebo"],
-                               "Prediction: negative on the left, about zero on the right.\nFrom results/profile.csv "
+                               "Prediction: negative on the left, no difference on the right.\nFrom results/profile.csv "
                                f"(tests.py); bands: bootstrap 95%{tail}")}
+    if data.profile_by_year is not None and len(data.profile_by_year):
+        figs["by_year"] = by_year(data.profile_by_year, path["by_year"],
+                                  f"Each year on its own with the same rules; bars: bootstrap 95%.\nFrom results/profile_by_year.csv{tail}")
+    if data.equity is not None and len(data.equity):
+        figs["equity_curve"] = equity_curve(data.equity, data.trade_summary, path["equity_curve"],
+                                            "Strike 3% below spot, 1-month options, at most 5 positions open; costs max(5% of premium, "
+                                            f"$0.05 per share) each way.\nFrom trade/equity.csv and summary.csv (trade.py){tail}")
     if walk is not None and len(walk[1].dropna()):
         figs["walkthrough"] = walkthrough(walk[0], walk[1], path["walkthrough"], note=walk_note)
     out = {}

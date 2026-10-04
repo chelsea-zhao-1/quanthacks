@@ -57,3 +57,23 @@ with the reason and what had been looked at.
   detectable old-versus-surprise difference there. The earlier prediction in the test plan (the sign holds without
   significance) is superseded by this one; the original text stays in the plan's history.
 - Whether to run the one-time 2026 out-of-sample test is left to a human (default off).
+- **Exploratory diagnostics added after the primary result** (power and minimum detectable effect, whether the classifier
+  separates the pre-entry inputs, leave-one-ticker-out and trimmed means, levels behind the difference). They are labelled
+  exploratory, logged in the ledger as "diagnostic", and do not change the primary conclusion. An independent recomputation
+  of the primary result and a lookahead audit are run by a separate reviewer.
+- **Independent audit passed** (`src/oldnews/audit.py`, separate code): labels, H1 and the placebo reproduce to 4 decimals;
+  no duplicate events; entry timing of all 751 events reproduces; no date outside 2024-25; trades recompute at 1x and 2x.
+  Disclosed: (1) the earnings exclusion uses earnings filings up to 5 sessions after entry, as the test plan states; earnings
+  dates are scheduled in advance, but this is information after entry and is disclosed as such; (2) the related-filing cue
+  also matches on the other filing's event date, slightly wider than the plan's wording (one placebo filing differs, no label
+  changes). The 5% trimmed difference (+0.081) is the pre-committed robustness figure; the 10% version (+0.071) is an
+  exploratory diagnostic. The trade's mean per trade is +0.121% (1x, h=10), +0.294% without its largest loss; the top 3
+  trades account for 167% of total P&L.
+- **QA end-to-end run found a bug** (fixed, not a design change): the notebook pipeline did not pass the full-text setting to
+  the event builder, so the notebook used the excerpt word score while the committed plan (since commit 34a11a4, before any
+  2024-25 result) makes full text primary. The notebook is fixed to match the plan; the excerpt result is already reported as a
+  sensitivity variant (H1 -0.012, one-sided p 0.46; also not significant).
+- **Incident in the QA scratch copy:** the starter's own worked-example cells made 3,283 uncached API requests (over our
+  3,000 ask-first limit) and marked late-2025 exits with 2026 option prices (hard rule 8). This happened only in a scratch copy
+  that was deleted; none of it entered our test, and nothing was committed. The notebook now clips every in-sample computation
+  before 2026-01-01 unless the human-only out-of-sample switch is on.
