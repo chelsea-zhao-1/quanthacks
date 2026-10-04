@@ -43,3 +43,6 @@ with the reason and what had been looked at.
   parameter: the hypothesis and test plan were committed before it, and the three amendments made afterwards
   concerned input coverage, a log transform and the constants, based on input distributions only. The constants
   are re-frozen from 2024-25 gap inputs.
+- **Full-text cues are primary** (amendment to the test plan, before any 2024-25 outcome was analysed): Massive allows
+  full EDGAR text; the excerpt-based cues fired in 19 of 271 late people-news filings against 68 for full text. The
+  excerpt stays as a sensitivity variant and the fallback. Only cue frequencies were looked at.

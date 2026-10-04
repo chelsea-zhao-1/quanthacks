@@ -101,8 +101,13 @@ late people-news events measurable because the cached strikes were chosen at the
 3. Related earlier filing: the same ticker filed another people-news 8-K in the 30 calendar days before
    this event date.
 
-Text source: Massive's `supporting_text`. If Massive permits full EDGAR filing text, the same cues are also
-computed on the full text and reported as a variant.
+Text source (amended before any 2024-25 outcome was analysed): the full 8-K text from EDGAR, which Massive has
+confirmed is allowed, with the three cues above computed on it (`T_full`). The first draft used Massive's short
+excerpt (`supporting_text`, 150 to 1,050 characters); it is kept as a sensitivity variant and as the fallback for a
+filing whose full text cannot be fetched (flagged). Reason: the excerpt shows a prior disclosure in only 19 of 271
+late people-news filings in the test window against 68 in the full text, so it cannot see most prior disclosures.
+Only cue counts, never outcomes, were looked at. An attached press-release exhibit dated before the filing is
+reported as a separate sensitivity flag, not part of `T`.
 
 **Total score** `S = w_m · M + w_t · T`. Old news if `S ≥ 1`; otherwise surprise news.
 
