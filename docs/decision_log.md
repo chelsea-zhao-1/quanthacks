@@ -77,3 +77,6 @@ with the reason and what had been looked at.
   3,000 ask-first limit) and marked late-2025 exits with 2026 option prices (hard rule 8). This happened only in a scratch copy
   that was deleted; none of it entered our test, and nothing was committed. The notebook now clips every in-sample computation
   before 2026-01-01 unless the human-only out-of-sample switch is on.
+- **Final QA passed** (commit b5a6a39): the whole notebook runs from a clean kernel with only the API key and the cache, zero
+  errors, about 15 minutes; all 26 old-news result files are identical to the reported ones (H1 +0.0966, p 0.8615, 45 old;
+  49 trades); no computation uses a date on or after 2026-01-01; the sealed cell is not run and the out-of-sample section is off.
