@@ -57,3 +57,7 @@ with the reason and what had been looked at.
   detectable old-versus-surprise difference there. The earlier prediction in the test plan (the sign holds without
   significance) is superseded by this one; the original text stays in the plan's history.
 - Whether to run the one-time 2026 out-of-sample test is left to a human (default off).
+- **Exploratory diagnostics added after the primary result** (power and minimum detectable effect, whether the classifier
+  separates the pre-entry inputs, leave-one-ticker-out and trimmed means, levels behind the difference). They are labelled
+  exploratory, logged in the ledger as "diagnostic", and do not change the primary conclusion. An independent recomputation
+  of the primary result and a lookahead audit are run by a separate reviewer.
