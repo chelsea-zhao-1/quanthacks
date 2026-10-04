@@ -18,10 +18,14 @@ The label alone sets the date guard, checked before any data are read (resolve_w
   holdout            no guard, only when NB has RUN_HOLDOUT is True (the judges' switch); the one label that may fetch a
                      disclosure response or EDGAR header missing from the cache, through the notebook's own cached
                      fetch_disclosures and fetch_acceptance_time
-  oos                no guard, only when NB has RUN_OOS is True (a human's switch); cache only
+  oos                only when NB has RUN_OOS is True (the human's one-time switch; this module never sets it). The
+                     window lies in OOS_START..OOS_END and no t_pre, t_0 or gap date is after OOS_END. Fetches like
+                     holdout (Massive through the notebook's api_get, EDGAR headers, full text). Its pools look back
+                     into 2024-25 (filings 2024-01-01..OOS_END); every rule is the committed insample rule, unchanged.
+estimate_requests(window, label, NB) counts the uncached Massive and SEC requests a build would make, fetching nothing.
 Any other label is refused. Insample is cache only: the notebook is put offline and a miss raises.
 
-Full-text variant (build(full_text="cache" or "fetch"); insample and holdout only, never discovery or dryrun): the same
+Full-text variant (build(full_text="cache" or "fetch"); insample, and holdout or oos behind their switches; never 2022-23): the same
 cues on each late people and placebo filing's full submission text from sec.gov (the 8-K and its EX-99 exhibits), at most
 8 requests per second, cached as sec_full_<sha1(filing_url)>.txt. Extra columns, existing ones untouched:
   full_text_status                 ok | empty (no 8-K document) | missing (not cached or not fetchable) | not_run
@@ -318,7 +322,8 @@ def gap_fields(ev: pd.DataFrame, clock: Clock) -> pd.DataFrame:
 
 
 def earnings_flag(ev: pd.DataFrame, earnings: pd.DataFrame, clock: Clock, k: int = EARNINGS_SESSIONS) -> pd.Series:
-    """1 if the filing has an earnings tag, or the same ticker has an earnings filing whose t_0 is within k sessions."""
+    """1 if the filing has an earnings tag, or the same ticker has an earnings filing whose t_0 is within k sessions.
+    The one exclusion rule for every label (insample, holdout, oos), as committed in docs/test_plan.md."""
     own = tag_sets(ev["tags"]).map(lambda t: bool(t & set(EARNINGS_TAGS)))
     by_ticker = {t: np.array([clock.pos(d) for d in g["t_0"]]) for t, g in earnings.groupby("ticker")}
     near = [bool(len(by_ticker.get(t, ())) and np.abs(by_ticker[t] - clock.pos(t0)).min() <= k)
@@ -511,6 +516,14 @@ def resolve_window(label: str, NB: dict, window: tuple | None = None) -> tuple[s
         hs, he = sealed_window(NB)
         if start <= he and end >= hs:
             raise PermissionError(f"insample window {start}..{end} overlaps the sealed window {hs}..{he}; refusing")
+    if label == "oos":           # the one-time run: inside OOS_START..OOS_END, and no t_pre, t_0 or gap date after OOS_END
+        o0, o1 = NB.get("OOS_START"), NB.get("OOS_END")
+        if not o0 or not o1:
+            raise PermissionError("oos needs OOS_START and OOS_END in the notebook namespace; refusing")
+        o0, o1 = str(pd.Timestamp(o0).date()), str(pd.Timestamp(o1).date())
+        if start < o0 or end > o1:
+            raise PermissionError(f"oos allows filing dates in {o0}..{o1} only; window is {start}..{end}")
+        stop = str((pd.Timestamp(o1) + pd.Timedelta(days=1)).date())
     return start, end, stop
 
 
@@ -521,7 +534,7 @@ def resolve_window(label: str, NB: dict, window: tuple | None = None) -> tuple[s
 # "Full text" is the 8-K document and its EX-99 exhibits (press releases); other exhibits, XBRL and graphics are dropped.
 FULL_PREFIX = "sec_full_"
 FULL_TYPES = ("8-K", "EX-99")          # document types kept (prefix match: 8-K, 8-K/A, EX-99.1, EX-99.2, ...)
-FULL_LABELS = ("insample", "holdout")
+FULL_LABELS = ("insample", "holdout", "oos")          # holdout and oos only behind their switches
 FULL_FROM = "2024-01-01"                # insample full text is never read for filings dated before this
 MAX_FULL_BYTES = 15_000_000
 SEC_MAX_RPS, SEC_RETRIES, SEC_FAILURES_TO_STOP, SEC_TIMEOUT = 8, 3, 5, 60
@@ -660,9 +673,10 @@ def check_full_text_label(label: str, NB: dict) -> None:
     """Strict data rule: full text is read for the confirmation window and the judges' window only, never for 2022-23."""
     if label == "insample":
         return
-    if label == "holdout":
-        if NB.get("RUN_HOLDOUT") is not True:
-            raise PermissionError("full text for 'holdout' runs only when RUN_HOLDOUT is True in the notebook; refusing")
+    if label in LIVE_LABELS:
+        switch = LIVE_LABELS[label]
+        if NB.get(switch) is not True:
+            raise PermissionError(f"full text for {label!r} runs only when {switch} is True in the notebook; refusing")
         return
     raise PermissionError(f"full filing text is read for {', '.join(FULL_LABELS)} only, never for {label!r} "
                           "(2022-23 discovery filings are never fetched or read in full)")
@@ -724,6 +738,75 @@ def full_text_summary(events: pd.DataFrame) -> dict:
     return res
 
 
+# ---- Request estimate (no fetching) ------------------------------------------------------------------------------------------
+def _api_cache_file(NB: dict, path_or_url: str, params: dict | None, cache_dir: Path) -> Path:
+    """The file the notebook's api_get caches this request under (sha1 of the full prepared URL)."""
+    import requests
+    url = path_or_url if path_or_url.startswith("http") else NB.get("BASE_URL", "https://api.massive.com") + path_or_url
+    full = requests.Request("GET", url, params=params).prepare().url
+    return Path(cache_dir) / (hashlib.sha1(full.encode()).hexdigest() + ".json")
+
+
+def _uncached_pages(NB: dict, path: str, params: dict, cache_dir: Path) -> tuple[int, bool, list[dict]]:
+    """(uncached pages known, whether more pages may follow an uncached one, the cached result rows) for one paginated
+    query: follows next_url through the cached pages only."""
+    import json
+    f, rows = _api_cache_file(NB, path, params, cache_dir), []
+    while f.exists():
+        payload = json.loads(f.read_text())
+        rows += list(payload.get("results") or [])
+        if not payload.get("next_url"):
+            return 0, False, rows
+        f = _api_cache_file(NB, payload["next_url"], None, cache_dir)
+    return 1, True, rows
+
+
+def estimate_requests(window: tuple | None, label: str, NB: dict, cache_dir: Path | None = None) -> dict:
+    """How many requests build(label, NB, window=window, full_text="fetch") would make that are not in the cache, without
+    fetching anything. The same guards apply (oos needs RUN_OOS True, holdout RUN_HOLDOUT True).
+      massive_pages     uncached Massive pages known for certain (taxonomy, each tag's disclosures, the oos look-back);
+                        massive_more_pages_possible lists queries whose later pages cannot be known until fetched
+      sec_headers       uncached EDGAR headers of filings already known from cached disclosures
+      sec_full_text     uncached full texts of people and placebo filings already known (an upper bound: only the late
+                        ones without an earnings exclusion are fetched)
+      unknown_filings   True when some disclosures are uncached, so their filings (and their SEC requests) are not counted
+    """
+    start, end, _ = resolve_window(label, NB, window)
+    cache_dir = Path(cache_dir) if cache_dir is not None else Path(NB.get("CACHE_DIR", CACHE_DIR))
+    pages, more, rows = 0, [], []
+    n, m, tax_rows = _uncached_pages(NB, "/stocks/taxonomies/vX/disclosures", {"limit": 1000}, cache_dir)
+    pages += n
+    tags = sorted({r["tertiary_category"] for r in tax_rows}) or REQUIRED_TAGS
+    queries = [(t, start, end) for t in tags]
+    if label == "oos":
+        i0, i1, _ = WINDOWS["insample"]
+        queries += [(t, i0, i1) for t in sorted(set(PEOPLE_TAGS) | set(EARNINGS_TAGS))]
+    for t, s, e in queries:
+        params = {"tertiary_category": t, "filing_date.gte": s, "filing_date.lte": e, "limit": 1000, "sort": "filing_date.asc"}
+        n, m, r = _uncached_pages(NB, "/stocks/filings/8-K/vX/disclosures", params, cache_dir)
+        pages += n
+        if m:
+            more.append(f"{t} {s}..{e}")
+        rows += [{**x, "_tag": t} for x in r]
+    top = set(NB.get("TOP_100", []))
+    norm = NB.get("normalize_ticker", lambda x: x)
+    seen, urls_hdr, urls_full = set(), 0, 0
+    for x in rows:
+        if not any(norm(k) in top for k in (x.get("tickers") or [])) or x["filing_url"] in seen:
+            continue
+        seen.add(x["filing_url"])
+        urls_hdr += not header_path(x["filing_url"], cache_dir).exists()
+    groups: dict = {}
+    for x in rows:
+        if x["filing_url"] in seen:
+            groups.setdefault(x["filing_url"], set()).add(x["_tag"])
+    for u, tg in groups.items():
+        if (tg & set(PEOPLE_TAGS) or tg & set(PLACEBO_TAGS)) and not full_text_path(u, cache_dir).exists():
+            urls_full += 1
+    return {"label": label, "window": (start, end), "massive_pages": pages, "massive_more_pages_possible": more,
+            "sec_headers": urls_hdr, "sec_full_text": urls_full, "unknown_filings": bool(more)}
+
+
 # ---- Build -------------------------------------------------------------------------------------------------------------
 def build(label: str = "insample", NB: dict | None = None, out_dir: Path = OUT_DIR,
           playground: Path = PLAYGROUND, write: bool = True, window: tuple | None = None,
@@ -758,7 +841,7 @@ def build(label: str = "insample", NB: dict | None = None, out_dir: Path = OUT_D
     if cache_dir is not None:
         NB["CACHE_DIR"] = Path(cache_dir)
     cache_dir = Path(NB.get("CACHE_DIR", CACHE_DIR))
-    fetching = label == "holdout"
+    fetching = label in LIVE_LABELS          # holdout and oos (each behind its switch, checked in resolve_window)
     if not fetching:
         go_offline(NB)
     clock = Clock.from_nb(NB)
@@ -782,13 +865,27 @@ def build(label: str = "insample", NB: dict | None = None, out_dir: Path = OUT_D
         # window. Both only understate.
         pool = pool[pool["filing_date"] >= pd.Timestamp(ALLOWED_FROM)].copy()
         pool["event_date"] = pool["event_date"].where(pool["event_date"] >= pd.Timestamp(ALLOWED_FROM))
+    if label == "oos":
+        # The pools look back into 2024-25 (the in-sample window's cached disclosures, people and earnings tags) and hold
+        # only filings dated 2024-01-01..OOS_END. The committed rules apply unchanged, exactly as for insample: the
+        # earnings exclusion is +-5 sessions of entry (including the 5 after, as committed and disclosed) and the
+        # related-filing cue is the insample rule. Filings after OOS_END are never read, so a late-August event may miss
+        # an earnings release just after OOS_END: a window-edge understatement of the same kind as at the start of 2024.
+        i0, i1, _ = WINDOWS["insample"]
+        prior_rows, _ = load_disclosures(NB, sorted(set(PEOPLE_TAGS) | set(EARNINGS_TAGS)), i0, i1)
+        prior = date_filings(accession_table(prior_rows), clock, cache_dir, fetch)
+        pool = pd.concat([prior, acc], ignore_index=True).drop_duplicates("accession_number", keep="last")
+        last = pd.Timestamp(hard_stop) - pd.Timedelta(days=1)
+        pool = pool[(pool["filing_date"] >= pd.Timestamp(ALLOWED_FROM)) & (pool["filing_date"] <= last)].copy()
+        pool["event_date"] = pool["event_date"].where(pool["event_date"] >= pd.Timestamp(ALLOWED_FROM))
     pool_tags = tag_sets(pool["tags"])
     people_pool = pool[pool_tags.map(lambda t: bool(t & set(PEOPLE_TAGS)))]
     earnings_pool = pool[pool_tags.map(lambda t: bool(t & set(EARNINGS_TAGS)))]
 
-    bounds = (ALLOWED_FROM, hard_stop, sealed_window(NB)) if label == "insample" else None
+    bounds = {"insample": (ALLOWED_FROM, hard_stop, sealed_window(NB)),
+              "oos": (ALLOWED_FROM, hard_stop, ("1900-01-01", "1900-01-01"))}.get(label)   # oos: nothing after OOS_END
     events, counts = event_table(acc[~acc["accession_number"].isin(dropped["row_id"].str.removeprefix("event|"))],
-                                 people_pool, earnings_pool, clock, hard_stop, bounds)
+                                 people_pool, earnings_pool, clock, hard_stop, bounds)    # same rules for every label
     counts["tags_not_cached"] = missing
     counts["entry_precedes_acceptance_dropped"] = len(dropped)
     dropped = (pd.concat([dropped, events.attrs["outside"]], ignore_index=True)       # window-guard drops, each with its reason
@@ -852,7 +949,7 @@ if __name__ == "__main__":
     ap.add_argument("--start", default=None, help="first filing date (default: the label's window)")
     ap.add_argument("--end", default=None, help="last filing date (default: the label's window)")
     ap.add_argument("--full-text", default=None, choices=["cache", "fetch"],
-                    help="add the full-text variant columns (insample and holdout only); fetch gets missing texts from sec.gov")
+                    help="add the full-text variant columns (insample; holdout and oos behind their switches); fetch gets missing texts from sec.gov")
     args = ap.parse_args()
     os.chdir(ROOT)                       # the notebook's cache path is relative to the repo root
     ev, nu = build(args.label, window=(args.start, args.end) if args.start or args.end else None, full_text=args.full_text)

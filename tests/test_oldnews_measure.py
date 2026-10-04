@@ -15,7 +15,7 @@ from oldnews import measure as M   # noqa: E402
 
 FAILS = []
 R, SIGMA, SEED = 0.04, 0.30, 20261003
-CAL = pd.bdate_range("2023-12-01", "2025-12-31")   # Dec 2023 precedes the window
+CAL = pd.bdate_range("2023-12-01", "2026-09-30")   # synthetic; Dec 2023 precedes the window
 
 
 def check(name, ok, detail=""):
@@ -102,7 +102,8 @@ def fake_nb(no_put_volume=()):
                 make_pe(ticker, t_pre, "2m", 60, put_volume=pv)[0]], []
     return {"CAL": CAL, "HORIZONS": [1, 2, 3, 5, 10, 21, 42, 63], "OTM_GRID": [0.03, 0.05, 0.10],
             "EXPIRY_BUCKETS": {"1m": (21, 45, 30), "2m": (46, 80, 60)}, "MAX_STALE_SESSIONS": 3,
-            "COST_HAIRCUT": 0.05, "LAST_SESSION": CAL[-1], "RUN_OOS": False, "price_event": price_event}
+            "COST_HAIRCUT": 0.05, "LAST_SESSION": CAL[-1], "RUN_OOS": False, "price_event": price_event,
+            "OOS_START": "2026-01-01", "OOS_END": "2026-08-31"}
 
 
 # ---- tests ------------------------------------------------------------------------------------------------
@@ -383,15 +384,121 @@ def test_window_guards():
     gap, _ = M.measure(rows_table(12), "holdout", NB={**fake_nb(), "RUN_HOLDOUT": True}, out_dir=None)
     check("holdout runs when RUN_HOLDOUT is True (no floor: any dates the judges choose)",
           len(gap) == 48 and gap.usable.all() and b("holdout", {**fake_nb(), "RUN_HOLDOUT": True})[0] is None)
-    check("oos refused when RUN_OOS is False", raises(lambda: M.measure(rows, "oos", NB=fake_nb(), out_dir=None)))
+
+
+def oos_rows(n_tickers=12):
+    """Synthetic rows in 2026 (fake prices only; no real data)."""
+    rows = rows_table(n_tickers)
+    shift = CAL.get_loc(pd.Timestamp("2026-02-02")) - 40
+    for c in ("t_pre", "t_0", "gap_start"):
+        rows[c] = [CAL[CAL.get_loc(d) + shift] for d in rows[c]]
+    return rows
+
+
+def oos_nb(on: bool, cache: set | None = None, fetched: list | None = None):
+    """A fake notebook whose price_event, like the real one, asks SESSION.get for anything not in `cache`."""
+    import types
+    nb = fake_nb()
+    inner = nb["price_event"]
+    cache = cache if cache is not None else set()
+
+    def get(url, *a, **k):
+        if fetched is not None:
+            fetched.append(url)
+        return None
+
+    def price_event(ticker, t_pre, t_0, event_date, buckets, otm):
+        if (ticker, pd.Timestamp(t_pre)) not in cache:
+            nb["SESSION"].get(f"https://api.example/chain/{ticker}/{pd.Timestamp(t_pre):%Y-%m-%d}")
+            cache.add((ticker, pd.Timestamp(t_pre)))
+        return inner(ticker, t_pre, t_0, event_date, buckets, otm)
+
+    nb.update(RUN_OOS=on, SESSION=types.SimpleNamespace(get=get), price_event=price_event,
+              OOS_WARNING="WARNING: THE OUT-OF-SAMPLE SECTION IS ON.\nsigned, lalitha")
+    return nb
+
+
+def test_oos():
     import contextlib
     import io
+    rows = oos_rows()
+    check("oos refused when RUN_OOS is False", raises(lambda: M.measure(rows, "oos", NB=oos_nb(False), out_dir=None), "RUN_OOS"))
+    check("oos refused when RUN_OOS is missing",
+          raises(lambda: M.measure(rows, "oos", NB={k: v for k, v in oos_nb(False).items() if k != "RUN_OOS"}, out_dir=None)))
+    check("estimate_requests refused when RUN_OOS is False", raises(lambda: M.estimate_requests(rows, "oos", oos_nb(False))))
+    check("fetching refused for insample", raises(lambda: M.measure(rows_table(2), "insample", NB=oos_nb(False), out_dir=None,
+                                                                   allow_fetch=True), "may not fetch"))
     err = io.StringIO()
     with contextlib.redirect_stderr(err):
-        warning = "WARNING: THE OUT-OF-SAMPLE SECTION IS ON.\nsigned, lalitha"
-        gap, _ = M.measure(rows, "oos", NB={**fake_nb(), "RUN_OOS": True, "OOS_WARNING": warning}, out_dir=None)
-    check("oos runs only with RUN_OOS True, and prints the warning", len(gap) == len(rows)
-          and err.getvalue().strip().endswith("signed, lalitha"))
+        cache = {(t, d) for t, d in zip(rows.ticker, rows.t_pre)}
+        nb = oos_nb(True, cache=cache)
+        gap, oc = M.measure(rows, "oos", NB=nb, out_dir=None)
+    check("oos runs when RUN_OOS is True (cache only), and prints the warning",
+          len(gap) == len(rows) and gap.usable.all() and err.getvalue().strip().endswith("signed, lalitha"))
+    check("oos floor is OOS_START and exits may pass OOS_END up to LAST_SESSION",
+          M.bounds_for("oos", nb) == (pd.Timestamp("2026-01-01"), CAL[-1] + pd.Timedelta(days=1)))
+    with contextlib.redirect_stderr(io.StringIO()):
+        for col, day in [("t_pre", "2025-12-30"), ("t_0", "2025-12-31"), ("t_pre", "2026-09-01"), ("t_0", "2026-09-02"),
+                         ("gap_start", "2026-09-01")]:
+            r = rows.copy()
+            r.loc[0, col] = pd.Timestamp(day)
+            check(f"oos: {col} on {day} refused", raises(lambda: M.measure(r, "oos", NB=oos_nb(True, cache=set(cache)),
+                                                                           out_dir=None), "refused"))
+        r = rows.copy()
+        r.loc[0, "gap_start"] = pd.Timestamp("2025-12-30")
+        g, _ = M.measure(r, "oos", NB=oos_nb(True, cache=set(cache)), out_dir=None)
+        check("oos: a gap reaching before OOS_START is flagged, not read",
+              not g.usable.iloc[0] and "gap reaches before 2026-01-01" in g.reason.iloc[0])
+
+        # offline (default): an uncached row is flagged; nothing is fetched
+        fetched = []
+        nb = oos_nb(True, cache=set(list(cache)[:-3]), fetched=fetched)
+        g, _ = M.measure(rows, "oos", NB=nb, out_dir=None)
+        check("oos offline: uncached rows flagged as cache misses, no request sent",
+              not fetched and g.reason.str.contains("cache miss").sum() >= 1)
+
+        # estimate: counts uncached keys without fetching, then restores SESSION.get
+        fetched = []
+        nb = oos_nb(True, cache=set(list(cache)[:-3]), fetched=fetched)
+        get_before = nb["SESSION"].get
+        est = M.estimate_requests(rows, "oos", nb)
+        check("estimate_requests counts 3 uncached keys without fetching",
+              est["uncached"] == 3 and est["requests_estimate"] == 3 * M.REQUESTS_PER_KEY and not fetched
+              and nb["SESSION"].get is get_before, str({k: est[k] for k in ("keys", "cached", "uncached")}))
+        panel = pd.DataFrame({"ticker": [f"P{i}" for i in range(500)], "t_pre": [CAL[CAL.get_loc(pd.Timestamp("2026-03-02")) + i % 100] for i in range(500)]})
+        panel["t_0"] = [CAL[CAL.get_loc(d) + 1] for d in panel.t_pre]
+        est = M.estimate_requests(rows, "oos", nb, panel_rows=panel)
+        check("estimate_requests includes at most 400 sampled panel keys", est["keys"] == len(cache) + 400, str(est["keys"]))
+
+        # fetching: allowed for oos with RUN_OOS True, through the notebook's own get
+        fetched = []
+        nb = oos_nb(True, cache=set(list(cache)[:-3]), fetched=fetched)
+        g, _ = M.measure(rows, "oos", NB=nb, out_dir=None, allow_fetch=True)
+        check("oos with allow_fetch fetches the 3 missing keys and prices every row", len(fetched) == 3 and g.usable.all())
+
+        # panel: oos rows plus at most 400 extra ticker-dates, only inside OOS_START..OOS_END
+        bad = pd.DataFrame({"ticker": ["Q1", "Q2"], "t_pre": [pd.Timestamp("2025-06-02"), pd.Timestamp("2026-09-15")],
+                            "t_0": [pd.Timestamp("2025-06-03"), pd.Timestamp("2026-09-16")]})
+        with tempfile.TemporaryDirectory() as d:
+            M.measure(rows, "oos", NB=oos_nb(True, cache=set(cache)), panel_rows=pd.concat([panel, bad]), out_dir=Path(d))
+            log = (Path(d) / "measure_progress.log").read_text()
+        check("oos panel: 2025 and post-OOS_END rows dropped, 400 extra keys at most",
+              "offered 502, kept 500" in log and "(400 panel-only keys, cap 400)" in log,
+              str([ln for ln in log.splitlines() if "panel" in ln][-2:]))
+
+        # repeated HTTP failures stop a fetching run
+        class HTTPError(Exception):
+            pass
+
+        def failing(url, *a, **k):
+            raise HTTPError("403 Forbidden")
+        nb = oos_nb(True, cache=set())
+        nb["SESSION"].get = failing
+        try:
+            M.measure(rows, "oos", NB=nb, out_dir=None, allow_fetch=True, batch_size=6)
+            check("a fetching run stops after 5 HTTP failures in a row", False)
+        except RuntimeError as e:
+            check("a fetching run stops after 5 HTTP failures in a row", "HTTP failures in a row" in str(e))
 
 
 def raises_exit(fn) -> bool:
@@ -509,7 +616,7 @@ def test_panel_cap():
 if __name__ == "__main__":
     for fn in [test_read_table, test_parity_and_iv, test_realized_vol, test_csp_costs, test_gap_inputs,
                test_market_returns, test_measure_end_to_end, test_gap_only, test_window_guards, test_window_bars,
-               test_floor_in_gap_inputs, test_panel_window, test_panel_cap]:
+               test_floor_in_gap_inputs, test_panel_window, test_panel_cap, test_oos]:
         fn()
     print(f"\n{'ALL PASS' if not FAILS else f'{len(FAILS)} FAILED: {FAILS}'}")
     sys.exit(1 if FAILS else 0)

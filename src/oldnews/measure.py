@@ -29,8 +29,13 @@ Conventions
   it are dropped; option bars are clipped to it, from below as well as above (no 2023 bar is ever returned to
   the notebook's pricing code, and the URLs stay those of the 2024-25 download, so the cache still hits).
   "holdout": only when the notebook's RUN_HOLDOUT is True (the judges' window, any dates up to LAST_SESSION).
-  "oos": only when RUN_OOS is True (prints OOS_WARNING; cache only). "discovery" and "dryrun" are retired and
-  refused, and so is any other label. Nothing on or after 2026-01-01 is read under the insample label.
+  "oos": only when RUN_OOS is True (a human switches it; prints OOS_WARNING). Its row dates (t_pre, t_0,
+  gap_start) must lie in OOS_START..OOS_END; bars are read from OOS_START up to LAST_SESSION, so exits may run past
+  OOS_END. "discovery" and "dryrun" are retired and refused, and so is any other label. Nothing on or after
+  2026-01-01 is read under the insample label.
+- Fetching: measure is offline by default. allow_fetch=True (holdout with RUN_HOLDOUT, oos with RUN_OOS only) lets
+  the notebook's own cached api functions fetch what is missing, one row at a time, and stops after 5 HTTP
+  failures in a row. estimate_requests() counts the uncached rows first, without fetching anything.
 - Judges' path (holdout, oos): the r_mkt panel is the run's own rows plus at most 400 extra ticker-dates from the
   window's other filings, a seeded sample (seed 20261003), so the run's cost stays bounded.
 """
@@ -60,6 +65,8 @@ RETIRED_MSG = ("2022-2023 is outside the allowed 2024-2025 window and overlaps t
                "(2023-06-01..2023-08-31)")
 SWITCHED = {"holdout": "RUN_HOLDOUT", "oos": "RUN_OOS"}   # windows that run only when the notebook switch is on
 PANEL_CAP = {"holdout": 400, "oos": 400}   # judges' path: at most this many extra panel keys
+REQUESTS_PER_KEY = 28          # API requests to price one uncached (ticker, t_pre), measured on the 2022-23 download
+FAILURES_TO_STOP = 5           # a fetching run stops after this many HTTP failures in a row
 SEED = 20261003
 BARS_FROM_DAYS = 10            # price_event fetches option bars from t_pre - 10 calendar days
 BASELINE_SESSIONS = 5          # volume baseline: the 5 sessions before gap_start (test plan)
@@ -304,7 +311,8 @@ def bounds_for(label: str, NB: dict, hard_stop: str | None = None) -> tuple[pd.T
             raise ValueError(f"label {label!r} runs only when the notebook's {SWITCHED[w]} is True; refused")
         if w == "oos":
             print(NB.get("OOS_WARNING", "WARNING: THE OUT-OF-SAMPLE SECTION IS ON."), file=sys.stderr, flush=True)
-        floor, stop = None, pd.Timestamp(NB["LAST_SESSION"]) + pd.Timedelta(days=1)
+        floor = pd.Timestamp(NB["OOS_START"]) if w == "oos" else None      # oos: nothing before OOS_START is read
+        stop = pd.Timestamp(NB["LAST_SESSION"]) + pd.Timedelta(days=1)
     else:
         floor, stop = INSAMPLE
         hs = pd.Timestamp(NB.get("HOLDOUT_START", HOLDOUT_PLACEHOLDER[0]))
@@ -317,19 +325,85 @@ def bounds_for(label: str, NB: dict, hard_stop: str | None = None) -> tuple[pd.T
     return floor, stop
 
 
+def entry_window(label: str, NB: dict) -> tuple[pd.Timestamp, pd.Timestamp] | None:
+    """[first, last] day a row's t_pre, t_0 and gap_start may take (None: any, the judges' window)."""
+    w = window_of(label)
+    if w == "insample":
+        return INSAMPLE[0], INSAMPLE[1] - pd.Timedelta(days=1)
+    if w == "oos":
+        return pd.Timestamp(NB["OOS_START"]), pd.Timestamp(NB["OOS_END"])
+    return None
+
+
+def _in_entry_window(df: pd.DataFrame, win, strict: bool, cols=("t_pre", "t_0", "gap_start")) -> pd.DataFrame:
+    """Hard-fail (strict) or drop rows with a date after the window's last day. Dates before its first day are
+    handled by the floor (gap_start before it only flags the row)."""
+    if win is None:
+        return df
+    for c in (c for c in cols if c in df):
+        bad = df[c] > win[1]
+        if bad.any():
+            if strict:
+                raise ValueError(f"{int(bad.sum())} rows have {c} after {win[1].date()}; refused")
+            df = df[~bad]
+    return df
+
+
+def estimate_requests(rows: pd.DataFrame, label: str, NB: dict, panel_rows: pd.DataFrame | None = None,
+                      max_panel: int | None | str = "auto") -> dict:
+    """How many API requests a fetching run would need, without fetching: every (ticker, t_pre) key of the rows
+    (plus the sampled panel keys) is priced with the network refused; a key that hits an uncached URL counts as
+    REQUESTS_PER_KEY requests (an estimate). The window guard applies as in measure()."""
+    floor, stop = bounds_for(label, NB)
+    cal = NB["CAL"]
+    win = entry_window(label, NB)
+    r = _in_entry_window(_dates(rows, ["t_pre", "t_0", "gap_start"], stop, cal, strict=True, floor=floor,
+                                soft=("gap_start",)), win, strict=True)
+    keys = list(dict.fromkeys(zip(r.ticker[r.t_pre_ok], r.t_pre[r.t_pre_ok])))
+    if panel_rows is not None and len(panel_rows):
+        e = _in_entry_window(_dates(panel_rows[["ticker", "t_pre", "t_0"]], ["t_pre", "t_0"], stop, cal,
+                                    strict=False, floor=floor), win, strict=False)
+        cap = PANEL_CAP.get(window_of(label)) if max_panel == "auto" else max_panel
+        keys += sample_panel(set(zip(e.ticker[e.t_pre_ok], e.t_pre[e.t_pre_ok])) - set(keys), cap)
+    session = NB.get("SESSION")
+    real_get = session.get if session is not None else None
+
+    def refuse(url, *a, **k):
+        raise CacheMiss(f"not in cache: {str(url).split('?')[0]}")
+
+    uncached, first_miss = [], {}
+    if session is not None:
+        session.get = refuse
+    try:
+        with window_bars(NB, floor, stop):
+            for tk, t_pre in keys:
+                try:
+                    NB["price_event"](tk, t_pre, t_pre, t_pre, NB["EXPIRY_BUCKETS"], list(NB["OTM_GRID"]))
+                except CacheMiss as e:
+                    uncached.append((tk, t_pre))
+                    first_miss[(tk, t_pre)] = str(e)
+    finally:
+        if session is not None:
+            session.get = real_get
+    return {"keys": len(keys), "cached": len(keys) - len(uncached), "uncached": len(uncached),
+            "requests_estimate": len(uncached) * REQUESTS_PER_KEY, "uncached_keys": uncached, "first_miss": first_miss}
+
+
 @contextmanager
 def window_bars(NB: dict, floor: pd.Timestamp | None, stop: pd.Timestamp):
     """Clip the notebook's option_bars to [floor, stop) for the length of the block, then put it back. Requests
     still go out with an end date of at most 2025-12-31 (the URLs of the 2024-25 download, so the offline cache
-    hits); the rows returned are cut at both ends, so no bar outside the window reaches any pricing code."""
+    hits); the rows returned are cut at both ends, so no bar outside the window reaches any pricing code. For a
+    window that ends after 2026-01-01 (oos) the request is not changed, only the rows returned are cut."""
     orig = NB.get("option_bars")
     if orig is None or floor is None:
         yield
         return
-    url_end = NEVER - pd.Timedelta(days=1)
+    url_end = NEVER - pd.Timedelta(days=1) if stop <= NEVER else None
 
     def option_bars(tk, start, end):
-        bars = orig(tk, start, min(pd.Timestamp(end), url_end))
+        end = pd.Timestamp(end)
+        bars = orig(tk, start, min(end, url_end) if url_end is not None else end)
         return bars.loc[(bars.index >= floor) & (bars.index < stop)]
 
     NB["option_bars"] = option_bars
@@ -433,8 +507,8 @@ class _Parts:
 def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: pd.DataFrame | None = None,
             hard_stop: str | None = None, entry_shift: int = 0, min_baseline: int = MIN_BASELINE,
             mode: str = "fresh", workers: int = 8, out_dir: Path | None = OUT_DIR, batch_size: int = 100,
-            log_path: Path | None = None, max_panel: int | None | str = "auto", outcomes: bool = True
-            ) -> tuple[pd.DataFrame, pd.DataFrame | None]:
+            log_path: Path | None = None, max_panel: int | None | str = "auto", outcomes: bool = True,
+            allow_fetch: bool = False) -> tuple[pd.DataFrame, pd.DataFrame | None]:
     """Price every row offline and return (gap, outcome); with out_dir, also write gap_<label>.csv,
     outcome_<label>.csv and drops_<label>.csv there. Resumable: finished batches are kept in
     <out_dir>/_parts_<label>/ and a rerun skips every row whose inputs have not changed.
@@ -451,21 +525,30 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
     its resumable results go to <out_dir>/_parts_<label>_gaponly/.
     mode: "fresh" (default) prices a spot or IV only from same-session closes of both ATM legs; "notebook" uses
     the notebook's marks, which may be up to MAX_STALE_SESSIONS old.
+    allow_fetch: let the notebook's cached api functions fetch what is missing (holdout with RUN_HOLDOUT True, oos
+    with RUN_OOS True only; one row at a time; stops after FAILURES_TO_STOP HTTP failures in a row). Run
+    estimate_requests() first. Default: offline, a missing URL flags the row.
     A row that cannot be priced gets usable=False and a reason; the run continues.
     """
     if mode not in ("fresh", "notebook"):
         raise ValueError(f"unknown mark mode {mode!r}")
     NB = NB if NB is not None else load_offline_nb()
-    if "SESSION" in NB:
-        go_offline(NB)
     floor, stop = bounds_for(label, NB, hard_stop)
+    if allow_fetch:
+        w = window_of(label)
+        if w not in SWITCHED or NB.get(SWITCHED[w]) is not True:
+            raise ValueError(f"label {label!r} may not fetch: only holdout (RUN_HOLDOUT) and oos (RUN_OOS) may")
+        workers = 1                               # sequential: the notebook's own pacing and retries apply
+    elif "SESSION" in NB:
+        go_offline(NB)
+    win = entry_window(label, NB)
     cal, horizons = NB["CAL"], list(NB["HORIZONS"])
     otm_grid, buckets = list(NB["OTM_GRID"]), NB["EXPIRY_BUCKETS"]
     max_stale, haircut = int(NB["MAX_STALE_SESSIONS"]), float(NB["COST_HAIRCUT"])
     last_day = min(cal[cal.searchsorted(stop) - 1], NB["LAST_SESSION"])
 
-    rows = _dates(rows, ["t_pre", "t_0", "gap_start"], stop, cal, strict=True, floor=floor,
-                  soft=("gap_start",)).reset_index(drop=True)
+    rows = _in_entry_window(_dates(rows, ["t_pre", "t_0", "gap_start"], stop, cal, strict=True, floor=floor,
+                                   soft=("gap_start",)), win, strict=True).reset_index(drop=True)
     if rows["row_id"].duplicated().any():
         raise ValueError(f"row_id is not unique ({int(rows.row_id.duplicated().sum())} duplicates)")
     rows["n_gap"] = pd.to_numeric(rows["n_gap"], errors="coerce")
@@ -474,7 +557,8 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
     extra = pd.DataFrame({"ticker": [], "t_pre": pd.to_datetime([]), "t_0": pd.to_datetime([]), "t_pre_ok": []})
     n_panel_in = 0
     if panel_rows is not None and len(panel_rows):
-        extra = _dates(panel_rows[["ticker", "t_pre", "t_0"]], ["t_pre", "t_0"], stop, cal, strict=False, floor=floor)
+        extra = _in_entry_window(_dates(panel_rows[["ticker", "t_pre", "t_0"]], ["t_pre", "t_0"], stop, cal,
+                                        strict=False, floor=floor), win, strict=False)
         n_panel_in = len(panel_rows)
     settings = {"hard_stop": f"{stop:%Y-%m-%d}", "entry_shift": entry_shift, "min_baseline": min_baseline,
                 "mode": mode, "bars_from_days": BARS_FROM_DAYS, "horizons": horizons, "otm_grid": otm_grid,
@@ -564,18 +648,26 @@ def measure(rows: pd.DataFrame, label: str, NB: dict | None = None, panel_rows: 
             out["error"] = why
         return out
 
-    t_start, n_todo, rows_done, errors = time.time(), len(todo) + len(bad), len(bad), 0
+    t_start, n_todo, rows_done, errors, streak = time.time(), len(todo) + len(bad), len(bad), 0, 0
     log(f"{len(rows):,} rows ({len(rows) - n_todo:,} already done), {len(keys):,} keys to price "
-        f"({len(all_keys):,} in all, panel included), mode={mode}, hard stop {stop.date()}")
+        f"({len(all_keys):,} in all, panel included), mode={mode}, hard stop {stop.date()}, "
+        f"{'FETCH ALLOWED' if allow_fetch else 'cache only'}")
     with window_bars(NB, floor, stop), ThreadPoolExecutor(max(1, workers)) as ex:
         for b in range(0, len(keys), batch_size):
             res = list(ex.map(work, keys[b:b + batch_size]))
             store.save({"per_row": {k: v for r in res for k, v in r["per_row"].items()},
                         "series": {r["key"]: r["series"] for r in res}})
             rows_done += sum(len(r["per_row"]) for r in res)
-            for r in (r for r in res if "error" in r):
+            for r in res:
+                if "error" not in r:
+                    streak = 0
+                    continue
                 errors += 1
+                streak = streak + 1 if any(x in r["error"] for x in ("HTTPError", "ConnectionError", "Timeout")) else 0
                 log(f"  {r['key'][0]} {r['key'][1]:%Y-%m-%d}: {r['error']}")
+            if allow_fetch and streak >= FAILURES_TO_STOP:
+                log(f"stopping: {streak} HTTP failures in a row (finished rows are kept; rerun to resume)")
+                raise RuntimeError(f"{streak} HTTP failures in a row; stopped")
             el, k = time.time() - t_start, min(b + batch_size, len(keys))
             log(f"keys {k:,}/{len(keys):,}, rows {rows_done:,}/{n_todo:,}, {el:.0f}s "
                 f"({el / k:.2f}s per key, ETA {el / k * (len(keys) - k) / 60:.1f} min), errors {errors}")

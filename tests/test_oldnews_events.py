@@ -339,7 +339,7 @@ check("holdout with its switch has no date guard, even in 2026 and beyond",
       rw("holdout", ("2026-09-01", "2027-02-28"), RUN_HOLDOUT=True) == ("2026-09-01", "2027-02-28", None))
 check("oos needs RUN_OOS to be exactly True, then takes the notebook's OOS dates",
       all(refused(lambda f=f: rw("oos", **f)) for f in ({}, {"RUN_OOS": False}, {"RUN_OOS": 1}))
-      and rw("oos", RUN_OOS=True) == ("2026-01-01", "2026-08-31", None))
+      and rw("oos", RUN_OOS=True) == ("2026-01-01", "2026-08-31", "2026-09-01"))
 check("each switch unlocks only its own label; neither loosens insample",
       refused(lambda: rw("holdout", RUN_OOS=True)) and refused(lambda: rw("oos", RUN_HOLDOUT=True))
       and refused(lambda: rw("insample", ("2025-06-01", "2026-03-01"), RUN_OOS=True, RUN_HOLDOUT=True))
@@ -531,8 +531,8 @@ OOS = [fil("O1", "2026-03-10", "20260310080000", "20260305")]
 check("oos without RUN_OOS is refused; RUN_HOLDOUT alone does not unlock it",
       refused(lambda: run_build("oos", OOS)) and refused(lambda: run_build("oos", OOS, RUN_HOLDOUT=True)))
 ev, nu, NBr, calls, files, dr = run_build("oos", OOS, RUN_OOS=True)
-check("oos with RUN_OOS: the notebook's OOS window, cache only (offline, nothing fetched)",
-      list(ev.row_id) == ["event|O1"] and offline(NBr) and calls["header"] == [] and ev.t_0.min() >= T("2026-01-01"))
+check("oos with RUN_OOS: the notebook's OOS window, fetching allowed like holdout (the notebook is not put offline)",
+      list(ev.row_id) == ["event|O1"] and not offline(NBr) and ev.t_0.min() >= T("2026-01-01"))
 
 
 # ---- Full-text variant: parsing -----------------------------------------------------------------------------------------------
@@ -742,7 +742,7 @@ check("build(full_text='cache') on insample: the full-text columns are added and
       and o.loc["I1", "full_text_status"] == "ok" and o.loc["I1", "cue_dated_prior_full"] == 1 and o.loc["I1", "cue_exhibit_dated_prior_full"] == 1
       and o.loc["I4", "full_text_status"] == "missing", str(o[E.FULL_COLUMNS].to_dict("index")))
 check("build(full_text=) refuses before reading anything for oos, retired labels and a bad mode; holdout needs its switch",
-      refused(lambda: E.build("oos", {"RUN_OOS": True}, playground=Path("/nonexistent"), window=("2026-03-01", "2026-03-31"), full_text="cache"), text="never for 'oos'")
+      refused(lambda: E.build("oos", {**NB0, "RUN_OOS": False}, playground=Path("/nonexistent"), window=("2026-03-01", "2026-03-31"), full_text="cache"))
       and refused(lambda: E.build("dryrun", None, full_text="cache"), text=RETIRED)
       and refused(lambda: E.build("insample", {**NB0}, playground=Path("/nonexistent"), full_text="sometimes"), ValueError)
       and refused(lambda: E.build("holdout", {"RUN_HOLDOUT": False}, playground=Path("/nonexistent"), window=("2026-09-01", "2026-09-30"), full_text="cache")))
@@ -755,6 +755,89 @@ ev4, *_ = run_build("insample", INS2, full_text="fetch")
 _requests.get = _no_network
 check("build(full_text='fetch'): uncached late filings are fetched through requests.get (the scripted fake) and read",
       sorted(ev4.full_text_status) == ["ok", "ok"] and ev4.set_index("accession_number").loc["I1", "cue_dated_prior_full"] == 1)
+
+# ---- oos: the one-time 2026 run (only with RUN_OOS True; this module never sets it) -------------------------------------
+check("oos window: inside OOS_START..OOS_END only, hard stop the day after OOS_END",
+      rw("oos", ("2026-02-01", "2026-03-31"), RUN_OOS=True) == ("2026-02-01", "2026-03-31", "2026-09-01")
+      and refused(lambda: rw("oos", ("2026-08-01", "2026-09-30"), RUN_OOS=True))
+      and refused(lambda: rw("oos", ("2025-12-01", "2026-02-01"), RUN_OOS=True))
+      and refused(lambda: E.resolve_window("oos", {"RUN_OOS": True}, ("2026-02-01", "2026-03-31"))))
+check("oos with RUN_OOS False, missing, 1 or 'yes' refuses build before reading or fetching anything",
+      all(refused(lambda f=f: E.build("oos", {**NB0, **f}, playground=Path("/nonexistent"))) for f in ({}, {"RUN_OOS": False}, {"RUN_OOS": 1}, {"RUN_OOS": "yes"})))
+check("the module never switches RUN_OOS on", "RUN_OOS\"] = True" not in Path(E.__file__).read_text(encoding="utf-8")
+      and "RUN_OOS'] = True" not in Path(E.__file__).read_text(encoding="utf-8"))
+OOS2 = [fil("O2", "2026-03-10", "20260310080000", "20260305", cached=False),                # header fetched like holdout
+        fil("O3", "2026-08-31", "20260831170000", "20260826"),                             # enters 2026-09-01: dropped, counted
+        fil("O4", "2026-01-08", "20260108080000", "20260105"),                             # related to P1 (2025-12)
+        fil("P1", "2025-12-15", "20251215080000", "20251212", tags=("director_departure",)),
+        fil("P0", "2023-12-15", "20231215080000", "20231212", tags=("director_departure",))]
+ev, nu, NBr, calls, files, dr = run_build("oos", OOS2, RUN_OOS=True, full_text="cache")
+o = ev.set_index("accession_number")
+check("oos: the uncached header is fetched; an entry after OOS_END is dropped and counted; no entry, pre-event or gap date after OOS_END",
+      sorted(ev.accession_number) == ["O2", "O4"] and calls["header"] == [furl(OOS2[0])]
+      and ev.attrs["counts"]["people_entry_on_or_after_2026-09-01"] == 1
+      and ev[["t_pre", "t_0", "gap_start"]].max().max() <= T("2026-08-31") and nu[["t_pre", "t_0", "gap_start"]].max().max() <= T("2026-08-31"),
+      str(ev.attrs["counts"]))
+check("oos pools: look back into 2024-25 only (a 2025 people filing is a related earlier filing; nothing before 2024 is queried)",
+      o.loc["O4", "cue_related_filing"] == 1 and all(s >= "2024-01-01" for _, s, _e in calls["disclosures"])
+      and any(s == "2024-01-01" and e == "2025-12-31" for _, s, e in calls["disclosures"]))
+check("oos full text runs with RUN_OOS True (cache mode: missing documents are reported, not fetched)",
+      set(ev.full_text_status) <= {"missing", "not_run"} and (ev.full_text_status == "missing").sum() == 2)
+ern = lambda acc, date, accepted: fil(acc, date, accepted, date.replace("-", ""), tags=("quarterly_earnings",))   # noqa: E731
+EV_O = fil("O5", "2026-03-10", "20260310080000", "20260305")
+ev_after, *_ = run_build("oos", [EV_O, ern("E1", "2026-03-12", "20260312070000")], RUN_OOS=True)
+ev_before, *_ = run_build("oos", [EV_O, ern("E2", "2026-03-05", "20260305070000")], RUN_OOS=True)
+check("oos earnings exclusion is the committed insample rule: a later earnings filing within 5 sessions excludes, as does an earlier one",
+      ev_after.earnings_excluded.tolist() == [1] and ev_before.earnings_excluded.tolist() == [1])
+ev_ins, *_ = run_build("insample", [fil("Q1", "2025-03-11", "20250311080000", "20250306"), ern("E3", "2025-03-13", "20250313070000")])
+check("insample keeps the committed +-5 sessions rule (a later earnings filing excludes)",
+      ev_ins.set_index("accession_number").loc["Q1", "earnings_excluded"] == 1)
+seen_calls = []
+_orig_flag = E.earnings_flag
+
+
+def _spy(ev, earnings, clock, *a, **k):
+    seen_calls.append((a, tuple(sorted(k.items()))))
+    return _orig_flag(ev, earnings, clock, *a, **k)
+
+
+E.earnings_flag = _spy
+try:
+    run_build("insample", [fil("Q1", "2025-03-11", "20250311080000", "20250306")])
+    run_build("oos", [EV_O], RUN_OOS=True)
+finally:
+    E.earnings_flag = _orig_flag
+check("insample and oos call the same exclusion function with the same parameters",
+      len(seen_calls) == 2 and seen_calls[0] == seen_calls[1] and "known_only" not in inspect.signature(E.earnings_flag).parameters,
+      str(seen_calls))
+
+
+# ---- estimate_requests: counts uncached requests, fetches nothing --------------------------------------------------------
+import json  # noqa: E402
+with tempfile.TemporaryDirectory() as tmp:
+    tmp = Path(tmp)
+    NBE = {**NB0, "RUN_OOS": True, "BASE_URL": "https://api.massive.com", "TOP_100": ["AAA"], "CACHE_DIR": tmp,
+           "normalize_ticker": lambda t: t.strip().upper().replace("/", ".")}
+    put = lambda path, params, payload: E._api_cache_file(NBE, path, params, tmp).write_text(json.dumps(payload))   # noqa: E731
+    put("/stocks/taxonomies/vX/disclosures", {"limit": 1000},
+        {"results": [{"tertiary_category": "ceo_departure"}, {"tertiary_category": "quarterly_earnings"}]})
+    q = lambda t: {"tertiary_category": t, "filing_date.gte": "2026-01-01", "filing_date.lte": "2026-08-31", "limit": 1000, "sort": "filing_date.asc"}   # noqa: E731
+    u1, u2 = ur("est1"), ur("est2")
+    put("/stocks/filings/8-K/vX/disclosures", q("ceo_departure"),
+        {"results": [{"tickers": ["aaa"], "filing_url": u1}, {"tickers": ["ZZZ"], "filing_url": ur("other")}],
+         "next_url": "https://api.massive.com/stocks/filings/8-K/vX/disclosures?cursor=abc"})
+    put("/stocks/filings/8-K/vX/disclosures", q("quarterly_earnings"), {"results": [{"tickers": ["aaa"], "filing_url": u2}]})
+    E.header_path(u2, tmp).write_text("<ACCEPTANCE-DATETIME>20260305070000\n")
+    _requests.get = _no_network
+    est = E.estimate_requests(None, "oos", NBE)
+    check("estimate_requests: uncached Massive pages (a next page, the 11 look-back queries), SEC headers and full texts, nothing fetched",
+          est["massive_pages"] == 12 and est["sec_headers"] == 1 and est["sec_full_text"] == 1 and est["unknown_filings"]
+          and len(est["massive_more_pages_possible"]) == 12 and est["window"] == ("2026-01-01", "2026-08-31"), str(est))
+    check("estimate_requests applies the same guards (oos without RUN_OOS, retired labels)",
+          refused(lambda: E.estimate_requests(None, "oos", {**NBE, "RUN_OOS": False}))
+          and refused(lambda: E.estimate_requests(None, "discovery", NBE), text=RETIRED))
+    est_i = E.estimate_requests(("2024-01-01", "2025-12-31"), "insample", {**NBE, "RUN_OOS": False})
+    check("estimate_requests for insample asks no look-back queries", est_i["massive_pages"] == 2 and est_i["window"] == ("2024-01-01", "2025-12-31"), str(est_i))
 
 print("\nALL PASS" if not FAILS else f"\n{len(FAILS)} FAILED: {FAILS}")
 sys.exit(1 if FAILS else 0)

@@ -25,7 +25,8 @@ Labels and date guards (.claude/ctx/06_window_guard.md; the starter notebook's c
     insample   the test. Every t_pre, t_0, gap, ordinary-day, panel and exit date lies in [2024-01-01, 2026-01-01)
                and outside the notebook's sealed placeholder HOLDOUT_START..HOLDOUT_END.
     holdout    the judges' sealed window: only when RUN_HOLDOUT is True; any dates; downloads allowed.
-    oos        2026, once, by a human: only when RUN_OOS is True; cache only.
+    oos        2026 (OOS_START..OOS_END), once, by a human: only when RUN_OOS is True; downloads allowed with
+               allow_fetch, after a combined request estimate that must stay under a cap (default 40,000).
     discovery, dryrun   retired: any call refuses. (A dry run of the judges' path is `dry_run()`, label insample.)
 
 Each module also checks its own dates.
@@ -71,6 +72,8 @@ N_NULLS, NULL_WINDOW, NULL_GAP = 2, 60, 5      # ordinary days: per filing, +/- 
 REQUESTS_PER_ROW = 28                          # upper bound per (ticker, pre-event session), all three buckets
 MEASURED_RPS = 6.0                             # requests per second, sequential, on our key (a conservative figure)
 FILINGS_PER_MONTH = 75                         # rough count of TOP_100 8-Ks (all tags) per month, for the step-0 estimate only
+OOS_REQUEST_CAP = 40_000                       # the one-time 2026 run refuses a larger request estimate unless the caller raises it
+PEOPLE_PLACEBO_SHARE = 0.42                    # rough share of TOP_100 8-Ks in the people and placebo sets (2024-25: 751 of ~1,800)
 PANEL_EXTRA = 400                              # at most this many extra ticker-dates priced only for the market panel (r_mkt)
 FAILURES_TO_STOP = 5                           # consecutive API failures before a download stops (CLAUDE.md rule 17)
 ZREF_FROZEN = SRC / "oldnews" / "zref_frozen_insample.json"   # the z-score constants (classify.frozen_path() wins); read here, never written. The old zref_frozen.json is a retired archive and is never read.
@@ -214,6 +217,9 @@ def window_rules(NB: dict, start: str, end: str, label: str) -> Window:
     if label == "oos":
         if NB.get("RUN_OOS") is not True:
             raise PermissionError("the out-of-sample window runs only after a human sets RUN_OOS = True (section 2)")
+        o0, o1 = NB.get("OOS_START", OOS_START), NB.get("OOS_END")
+        if start < o0 or (o1 and end > o1):
+            raise PermissionError(f"label 'oos' runs on {o0}..{o1} only; got {start}..{end}")
         print(NB.get("OOS_WARNING", "WARNING: OUT-OF-SAMPLE RUN"), file=sys.stderr)
         return Window(start, end, hard_stop=None)
     if label == "holdout":
@@ -434,6 +440,66 @@ def prepare_inputs(NB: dict, w: Window, label: str, source: str | None, allow_fe
     return ev, nu, origin
 
 
+def events_estimate(NB: dict, w: Window, label: str) -> tuple[int, str]:
+    """events.estimate_requests: uncached Massive pages + EDGAR headers + full texts. When some disclosures are not
+    cached, their filings are unknown, so a rough upper bound for their SEC requests is added and said so."""
+    months = max((pd.Timestamp(w.end) - pd.Timestamp(w.start)).days / 30.4, 1.0)
+    filings = int(round(months * FILINGS_PER_MONTH))
+    try:
+        from oldnews import events as E
+        est = _call(E.estimate_requests, window=(w.start, w.end), label=label, NB=NB)
+    except (ImportError, AttributeError):
+        return 2 * 120 + filings + int(round(filings * PEOPLE_PLACEBO_SHARE)), "rough upper bound (no events.estimate_requests)"
+    n = int(est.get("massive_pages", 0)) + int(est.get("sec_headers", 0)) + int(est.get("sec_full_text", 0))
+    note = (f"events.estimate_requests: {est.get('massive_pages', 0)} Massive pages, {est.get('sec_headers', 0)} EDGAR "
+            f"headers, {est.get('sec_full_text', 0)} full texts")
+    if est.get("unknown_filings"):
+        extra = filings + int(round(filings * PEOPLE_PLACEBO_SHARE)) + 2 * len(est.get("massive_more_pages_possible", []))
+        n += extra
+        note += f", plus ~{extra:,} for filings and later pages not yet known (rough)"
+    return n, note
+
+
+def measure_estimate(NB: dict, label: str, rows: pd.DataFrame | None, panel: pd.DataFrame | None,
+                     n_rows: int, panel_max_extra: int) -> tuple[int, str]:
+    """measure.estimate_requests on the run's rows and panel when they exist (exact count of uncached keys), else a
+    rough upper bound from the projected number of rows."""
+    if rows is not None:
+        try:
+            from oldnews import measure as M
+            est = _call(M.estimate_requests, rows, label, NB, panel_rows=panel)
+            return int(est["requests_estimate"]), (f"measure.estimate_requests: {est['uncached']:,} of {est['keys']:,} "
+                                                   "(ticker, pre-event session) keys not cached")
+        except (ImportError, AttributeError, KeyError, TypeError):
+            pass
+        keys = rows[["ticker", "t_pre"]].drop_duplicates().shape[0] + (0 if panel is None else len(panel))
+        return keys * REQUESTS_PER_ROW, "upper bound: every key uncached"
+    return (n_rows + panel_max_extra) * REQUESTS_PER_ROW, "rough upper bound from the projected rows"
+
+
+def check_estimate(stage: str, w: Window, label: str, parts: list[tuple[str, int, str]], max_requests: int | None) -> int:
+    """Print the combined estimate and refuse above the cap (CLAUDE.md rule 18), before the fetch it covers."""
+    total = sum(n for _, n, _ in parts)
+    detail = " + ".join(f"{name} ~{n:,} ({note})" for name, n, note in parts)
+    print(f"[oldnews] request estimate {stage}, {label} {w.start}..{w.end}: {detail} = ~{total:,}; " + estimate(total)
+          + (f"; cap {max_requests:,}" if max_requests is not None else ""), flush=True)
+    if max_requests is not None and total > max_requests:
+        raise RuntimeError(f"the request estimate (~{total:,}) exceeds the cap of {max_requests:,}; nothing more was "
+                           "fetched. Raise --max-requests (after asking, CLAUDE.md rule 18) or narrow the window.")
+    return total
+
+
+def preflight_estimate(NB: dict, w: Window, label: str, max_requests: int | None, panel_max_extra: int) -> dict:
+    """Before anything is fetched: the events step's estimate plus a projected measure estimate (its rows are known
+    only after the events step; the exact count is checked again before the option download)."""
+    months = max((pd.Timestamp(w.end) - pd.Timestamp(w.start)).days / 30.4, 1.0)
+    rows = int(round(months * FILINGS_PER_MONTH * PEOPLE_PLACEBO_SHARE)) * (1 + N_NULLS)
+    ev, ev_note = events_estimate(NB, w, label)
+    me, me_note = measure_estimate(NB, label, None, None, rows, panel_max_extra)
+    total = check_estimate("before any fetch", w, label, [("events", ev, ev_note), ("measure", me, me_note)], max_requests)
+    return {"events": ev, "measure_projected": me, "total": total}
+
+
 def warm_cache(NB: dict, keys: pd.DataFrame, max_requests: int | None = None) -> None:
     """With allow_fetch only: price every (ticker, t_pre) once through the notebook's price_event, one request
     at a time, so its chain and option bars are cached before measure (which never fetches) runs. Prints the
@@ -550,12 +616,11 @@ def superset_disclosures(NB: dict, superset: Window | None):
 
 def full_text_mode(label: str, allow_fetch: bool) -> str | None:
     """The word score's text source, as the committed test plan says (commit 34a11a4): the full EDGAR filing text.
-    insample reads the cached full texts; holdout fetches the missing ones (through events.SecFetcher, the polite
-    SEC client) when allow_fetch, else reads the cache. oos: None, because events.build reads full text for
-    insample and holdout only; that run falls back to the excerpt and says so in its counts."""
+    insample reads the cached full texts; holdout and oos (each behind its notebook switch) fetch the missing ones
+    through events.SecFetcher, the polite SEC client, when allow_fetch, else read the cache."""
     if label == "insample":
         return "cache"
-    if label == "holdout":
+    if label in ("holdout", "oos"):
         return "fetch" if allow_fetch else "cache"
     return None
 
@@ -628,7 +693,7 @@ def run_oldnews(start: str, end: str, label: str, allow_fetch: bool = False, NB:
     """Run the hypothesis test on filings dated start..end and return every table it produced.
 
     label         "insample" (the test, 2024-2025), "holdout" (the judges' sealed window, needs RUN_HOLDOUT) or
-                  "oos" (one human run, needs RUN_OOS, cache only). "discovery" and "dryrun" are retired and refused.
+                  "oos" (one human run, needs RUN_OOS; may fetch, capped). "discovery" and "dryrun" are retired.
     allow_fetch   False: cache only; a missing response stops the run. True: the notebook's own cached API
                   functions download what is missing first (the judges' path). Never set it for the test window.
     NB            the notebook namespace (pass globals() in the notebook); loaded from the notebook if None.
@@ -636,7 +701,8 @@ def run_oldnews(start: str, end: str, label: str, allow_fetch: bool = False, NB:
     market_panel  also price a seeded sample of at most `panel_max_extra` (default 400) ticker-dates beyond the
                   rows the run prices, so r_mkt (the market's return over the gap) is the median across more
                   TOP_100 tickers (test plan). For insample only rows inside 2024-2025 qualify.
-    max_requests  with allow_fetch: refuse before fetching if the printed estimate exceeds this many requests.
+    max_requests  with allow_fetch: refuse before fetching if the printed estimate exceeds this many requests
+                  (oos: 40,000 unless given).
     out_dir       write everything here instead of data/oldnews/ (a scratch folder).
     quiet         print nothing (no log, no step output, no results).
     stages        a dict to fill with each stage's status ("ran") as it finishes, even if a later one fails.
@@ -656,8 +722,8 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
         import nb
         NB = nb.load()
     w = window_rules(NB, start, end, label)
-    if label == "oos" and allow_fetch:
-        raise PermissionError("the out-of-sample window is cache only (allow_fetch must be False)")
+    if label == "oos" and max_requests is None:
+        max_requests = OOS_REQUEST_CAP
     try:
         zref_sha: str | None = check_frozen_constants()
     except FrozenConstantsMissing as e:
@@ -683,6 +749,8 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
 
     result: dict[str, Any] = {"label": label, "start": w.start, "end": w.end, "window": w, "stages": stages}
     stop = w.hard_stop              # None for the sealed and out-of-sample windows: measure decides by label and switch
+    if allow_fetch:
+        result["request_estimate"] = preflight_estimate(NB, w, label, max_requests, panel_max_extra)
     with sandbox(NB, allow_fetch, w.clip_before):
         raw_ev, raw_nu, origin = prepare_inputs(NB, w, label, source, allow_fetch)
         stages["inputs"] = "ran"
@@ -701,8 +769,13 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
             log(f"2 measure: the market panel adds {len(panel)} ticker-dates to the {len(rows)} rows priced "
                 f"(at most {panel_max_extra}, seed {SEED})")
         if allow_fetch:
+            me, me_note = measure_estimate(NB, label, rows, panel, len(rows), panel_max_extra)
+            result["request_estimate"]["measure"] = me
+            check_estimate("before the option download", w, label,
+                           [("events (already fetched)", result["request_estimate"]["events"], "estimate"),
+                            ("measure", me, me_note)], max_requests)
             warm_cache(NB, pd.concat([rows[["ticker", "t_pre", "t_0"]].dropna(), panel], ignore_index=True)
-                       if panel is not None else rows[["ticker", "t_pre", "t_0"]].dropna(), max_requests)
+                       if panel is not None else rows[["ticker", "t_pre", "t_0"]].dropna(), None)
         with restoring(NB):
             gap, outcome = _call(steps.measure, rows, label, NB=NB, panel_rows=panel,
                                  **({"hard_stop": stop} if stop else {}), out_dir=OUT)
@@ -729,7 +802,7 @@ def _run_oldnews(start, end, label, allow_fetch, NB, source, market_panel, panel
         result["tests_summary"] = _summary(OUT / f"results_{label}")
         stages["tests"] = "ran"
         log("4 tests: written to " + str(OUT / f"results_{label}"))
-        result["trade"] = _call(steps.trade, label, labels=classified, data_dir=OUT)
+        result["trade"] = _call(steps.trade, label, labels=classified, data_dir=OUT, NB=NB)
         result["trade_summary"] = _summary(OUT / f"trade_{label}")
         stages["trade"] = "ran"
         log("5 trade: written to " + str(OUT / f"trade_{label}"))
@@ -907,6 +980,8 @@ def main() -> int:
     ap.add_argument("--no-figures", action="store_true")
     ap.add_argument("--figures-only", action="store_true",
                     help="draw the figures from the tables a finished run of this label wrote; compute nothing else")
+    ap.add_argument("--max-requests", type=int, default=None,
+                    help=f"refuse before fetching if the request estimate exceeds this (oos default {OOS_REQUEST_CAP:,})")
     ap.add_argument("--dry-run", action="store_true",
                     help=f"quiet end-to-end check on {DRY_RUN_WINDOW[0]}..{DRY_RUN_WINDOW[1]} in a scratch folder (deleted)")
     args = ap.parse_args()
@@ -921,12 +996,21 @@ def main() -> int:
         for name, path in figures_only(args.label).items():
             print(f"{name}: {path}")
         return 0
+    NB = None
     w = WINDOWS.get(args.label)
     start, end = args.start or (w and w.start), args.end or (w and w.end)
+    if args.label == "oos":
+        import nb                       # the notebook as the human edited it: RUN_OOS comes from its section 2
+        NB = nb.load()
+        if NB.get("RUN_OOS") is not True:
+            print("refused: RUN_OOS is not True in the notebook (section 2). Only a human switches it on, once.",
+                  file=sys.stderr)
+            return 2
+        start, end = args.start or NB["OOS_START"], args.end or NB["OOS_END"]
     if not (start and end):
         ap.error(f"--start and --end are required for label {args.label!r}")
-    report(run_oldnews(start, end, args.label, allow_fetch=args.allow_fetch, source=args.source,
-                       figures=not args.no_figures))
+    report(run_oldnews(start, end, args.label, allow_fetch=args.allow_fetch, NB=NB, source=args.source,
+                       max_requests=args.max_requests, figures=not args.no_figures))
     return 0
 
 
