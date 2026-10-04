@@ -12,7 +12,7 @@ Companies have four business days to file an 8-K after an executive or director 
 
 Each late people-news filing is labelled **old news** or **surprise news** using only what was known at the last close before acceptance. The label combines a math score (the stock's gap move against the market, the change in implied volatility, option volume) with a word score from the full EDGAR text. The pipeline then measures log(realised / implied volatility) after entry, relative to matched ordinary days for the same stock, and tests a cash-secured put sold on old-news filings.
 
-**Result (2024–25: 146 filings, 59 tickers, 45 old news vs 101 surprise).** Our primary test used a 10-session horizon and 1-month options, and predicted a negative difference. We got **+0.097** (95% interval −0.069 to +0.262, one-sided p = 0.86): the wrong sign, and not significant. Old news against ordinary days with equally large gap moves: −0.036 (p = 0.25). The placebo (late scheduled filings with no people news) gave +0.099 (p = 0.40), about the same as the main test. No horizon survives the Benjamini-Hochberg correction, and none of the 22 sensitivity variants is significant.
+**Result (2024–25: 146 filings, 59 tickers, 45 old news vs 101 surprise).** Our primary test used a 10-session horizon and 1-month options, and predicted a negative difference. We got **+0.097** (95% interval −0.069 to +0.262, one-sided p = 0.86): the wrong sign, and not significant. Old news against ordinary days with equally large gap moves: −0.036 (p = 0.25). The placebo (late scheduled filings with no people news) gave +0.099 (p = 0.40), about the same as the main test. No horizon survives the Benjamini-Hochberg correction, and none of the 23 sensitivity settings is significant.
 
 **The trade.** 49 old-news puts, closed after 10 sessions, made **+1.19%** of collateral net of costs and **−0.84% at double costs**, with a −4.68% maximum drawdown. Compared with the same put on matched ordinary days the difference is −0.09 points (interval −0.86 to +0.64). There is no edge.
 
@@ -21,7 +21,7 @@ Each late people-news filing is labelled **old news** or **surprise news** using
 - **Hypothesis first.** The hypothesis and the full test plan (weights, cutoff, horizons, placebo, costs) were committed before any outcome existed. Every later change is logged with its reason.
 - **No lookahead.** Entry is the first close after the EDGAR acceptance time. Filings accepted after 15:30 ET enter the next session.
 - **Frozen constants.** We computed the z-score constants once, from 1,245 ordinary days and gap inputs only, and never changed them.
-- **Statistics.** Permutation tests, bootstrap intervals, BH q-values across every fixed horizon, leave-one-ticker-out checks, and all 337 evaluated variants logged and disclosed.
+- **Statistics.** Permutation tests, bootstrap intervals, BH q-values across every fixed horizon, leave-one-ticker-out checks, and every variant logged and disclosed: 420 ledger rows, 242 for the 2024–25 test and 178 from the discarded 2022–23 exploration.
 - **Costs and capacity.** The larger of 5% of premium or $0.05 per share, each way; every result is repeated at double costs, and size is capped at 10% of entry-day put volume.
 - **Engineering.** A team of Claude Code agents built the pipeline, each owning one module under hard rules: never touch the API key, never compute on 2026 data. Each module has synthetic tests. One command reproduces every number, and a report script writes those numbers to a single file that the README, the note and this page all quote.
 
@@ -33,7 +33,7 @@ Each late people-news filing is labelled **old news** or **surprise news** using
 
 ## Accomplishments that we're proud of
 
-We ran a clean, pre-registered test and kept its answer. Date guards refuse the sealed and 2026 windows unless a human switches them on. Our updated prediction for the sealed window is already written down: no detectable difference.
+We ran a clean, pre-registered test and kept its answer. The 2024-25 test was itself one-shot, with the plan and frozen constants committed before any outcome; the 2026 out-of-sample section is implemented but shipped off, as the notebook's signed warning requires, so the judges' sealed-window rerun is the true out-of-sample check. Our updated prediction for the sealed window is already written down: no detectable difference.
 
 ## What we learned
 
@@ -41,7 +41,7 @@ The options market seems to price these filings efficiently. The placebo looks l
 
 ## What's next
 
-The judges' sealed-window run, the one-time 2026 test (left to a human), a larger sample if Massive allows 2022–23, and quotes in place of last-trade marks.
+The judges' sealed-window run, a larger sample if Massive allows 2022–23, and quotes in place of last-trade marks.
 
 ## Built with
 

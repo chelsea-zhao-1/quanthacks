@@ -125,19 +125,20 @@ quote the same numbers; copy them from that file, never retype them.
 - **Frozen constants.** The z-score constants that standardise the math inputs are frozen once from the
   in-sample ordinary days in `src/oldnews/zref_frozen_insample.json` and applied unchanged to every window. The
   pipeline only reads that file and stops with a clear message if it is missing.
-- **Out-of-sample is off.** `RUN_OOS = False` in section 2. Switching it on is the one-time final test, done
-  once by a human after everything is frozen; the pipeline refuses the out-of-sample window otherwise.
+- **Out-of-sample is off.** `RUN_OOS = False` in section 2. The 2026 section is implemented and tested but
+  shipped off, as the notebook's signed warning requires, and no 2026 result is reported; the
+  2024-2025 test was itself one-shot, and the judges' sealed-window rerun is the true out-of-sample check.
 - **Dates are guarded in code.** Options history on our key covers only 2024 to 2026, so the test reads only
   dates from 2024-01-01 to before 2026-01-01 and nothing inside the notebook's sealed placeholder; any other
-  window label is refused. The sealed window runs only with `RUN_HOLDOUT = True`, 2026 only with
-  `RUN_OOS = True`. Each module checks its own dates and stops if one is out of range.
+  window label is refused. The sealed window runs only with `RUN_HOLDOUT = True`. Each module checks its own dates and stops if one is out of range.
 - **No lookahead.** Entry is the first close after the EDGAR acceptance time (a filing accepted after 15:30 ET,
   or the same margin before an early close, enters the next session). Every classification input is known by
   the last close before acceptance.
 - **Costs everywhere.** Every option trade pays the larger of 5% of premium or $0.05 per share on entry and on
   exit, and every result is repeated at double costs. Capacity is capped at 10% of the put's entry-day volume.
 - **Every test is logged.** Each variant the tests evaluate is appended to the test ledger, so the number of
-  variants can be disclosed. Seeds are fixed (20261003).
+  variants can be disclosed (420 rows: 242 for the 2024-2025 test, 178 from the discarded 2022-2023
+  exploration). Seeds are fixed (20261003).
 - **Known limitations.** The universe is today's top 100 applied to the past (survivorship bias); the stock
   price is recovered from option prices by put-call parity with a flat rate and no dividends; option marks are
   last trades, not quotes; earnings tagging in the 8-K data is incomplete, so some earnings dates are missed.
