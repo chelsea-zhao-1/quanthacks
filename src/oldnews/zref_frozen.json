@@ -1,0 +1,37 @@
+{
+  "_note": "FROZEN CONSTANTS. Computed once from the DISCOVERY window only (filings 2022-01-01 to 2023-12-31): usable ordinary days, people and placebo together, gap inputs only, never outcomes. Applied unchanged to discovery, confirmation, the dry run and the sealed window (docs/test_plan.md, Classification).",
+  "source": "discovery",
+  "uses_outcomes": false,
+  "inputs": {
+    "gap_move": "|r_gap - r_mkt| / (sigma * sqrt(n))",
+    "d_iv_gap": "1m ATM IV at t_pre minus at gap start",
+    "log_vol_gap_ratio": "log(ATM-pair volume in the gap / mean over the 5 sessions before); a ratio of 0 has no log and counts as missing"
+  },
+  "window_t_0": {
+    "first": "2022-01-04",
+    "last": "2023-12-29"
+  },
+  "n_null_rows": 1313,
+  "null_row_ids_sha256": "4f771ae7ae1fa3c693b4a41b68923dd1fae9c78257a805486d018a3ed6ce4279",
+  "ddof": 1,
+  "constants": {
+    "gap_move": {
+      "mean": 0.5567465193325897,
+      "sd": 0.4540247205329628,
+      "n": 1313,
+      "row_ids_sha256": "4f771ae7ae1fa3c693b4a41b68923dd1fae9c78257a805486d018a3ed6ce4279"
+    },
+    "d_iv_gap": {
+      "mean": -0.01251437528353381,
+      "sd": 0.03487775868913488,
+      "n": 686,
+      "row_ids_sha256": "6adbf4318578701df3bc0bb82780c89d28e4c91411d3e2606e3753a6e632f742"
+    },
+    "log_vol_gap_ratio": {
+      "mean": 1.3413632344533335,
+      "sd": 1.524431417605729,
+      "n": 1013,
+      "row_ids_sha256": "091ed5f1706d476a3901cf56c37ec6643b77acb54f1943cc3e17f1287bc074a1"
+    }
+  }
+}
