@@ -4,7 +4,7 @@ Sarah Spellman, Lalitha Kantam, Chelsea Zhao, Shayaan Nesargi · University of F
 
 ## 1. Hypothesis
 
-**A null result: a specific mechanism, rules fixed in advance, and 2024-25 data that do not support it.** Executive and director changes (Item 5.02) at the 100 largest US firms are mostly filed days late. We believed they come in two kinds: *old news*, which the market heard first (an unusual stock move between event and filing, or the filing says the news was public), and *surprise news* (neither). Either way the filing is a dated headline that draws option demand and lifts implied volatility; unlike earnings, nothing follows to bring it down. After surprise news that premium pays for a move to come; after old news, for one already made. We predicted realised volatility would fall short of implied by more after old news (H1: 10 sessions, 1-month options), so a cash-secured put sold on old news would beat the same put elsewhere (H2). The other side is the option buyer the headline draws; our put seller supplies that demand. Such a premium could persist because it is small, event-specific, short-lived and hard to separate from ordinary volatility risk; our data did not find it.
+**A null result: a specific mechanism, rules fixed in advance, and 2024-25 data that do not support it.** Executive and director changes (Item 5.02) at the 100 largest US firms are mostly filed days late. We posited two kinds: *old news*, which the market heard first (an unusual stock move between event and filing, or the filing says the news was public), and *surprise news* (neither). Either way the filing is a dated headline that draws option demand and lifts implied volatility; unlike earnings, nothing follows to bring it down. After surprise news that premium pays for a move to come; after old news, for one already made. We predicted realised volatility would fall short of implied by more after old news (H1: 10 sessions, 1-month options), so a cash-secured put sold on old news would beat the same put elsewhere (H2). The other side is the option buyer the headline draws; our put seller supplies that demand. Such a premium could persist because it is small, event-specific, short-lived and hard to separate from ordinary volatility risk; our data did not find it.
 
 Every rule, the frozen constants and the test plan were committed before any 2024-25 outcome was seen (hypothesis 07d3ddb, 2026-10-03 19:28 ET; test plan 79c001d, 19:49; constants 5bbfd9d, 22:18; first 2024-25 result 4ba177e, 22:20; amendments in `docs/decision_log.md`), so 2024-25 is a single pre-registered test with no tuning period. The notebook's 2026 out-of-sample section ships off, as its signed organiser warning requires, so no 2026 result exists; the judges' sealed-window rerun is the replication.
 
@@ -16,7 +16,7 @@ Every rule, the frozen constants and the test plan were committed before any 202
 
 **Outcome:** Y_h = log(RV_h / IV_0): realised volatility from `t_0` to h over 1-month ATM implied volatility at `t_0`, minus its mean on matched ordinary days (same ticker, ±60 sessions, over 5 sessions from any 8-K, same gap length).
 
-**Tests:** H1, old minus surprise, one-sided label permutation (10,000 draws, seed 20261003); H1b, old events against ordinary days with gap moves as large; P (placebo), H1 on late governance and payout filings; H2, the put net of costs against ordinary days. Every horizon gets a bootstrap 95% interval and a Benjamini-Hochberg q; every variant is logged (§9).
+**Tests:** H1, old minus surprise, one-sided label permutation (10,000 draws, seed 20261003); H1b, old events against ordinary days with gap moves as large; P (placebo), H1 on late governance and payout filings; H2, the put net of costs against ordinary days. Every horizon gets a bootstrap 95% interval and a Benjamini-Hochberg q.
 
 ![Figure 1](../data/oldnews/figures/insample/fig_method.png)
 
@@ -46,13 +46,13 @@ H1 has the wrong sign and is not significant: +0.0966 (95% CI −0.0685 to +0.26
 
 ## 5. How to trade it
 
-We would not trade it. As tested: sell a 1-month put 3% below spot at `t_0`, the first close after EDGAR acceptance (for the 251 trade-eligible filings, a median 2 sessions after the event, IQR 1 to 3; 64% were accepted at or after 15:30 ET and enter the next session), on each old-news filing; close after 10 sessions; at most five positions; collateral strike × 100. The committed cost rule is the larger of 5% of premium or $0.05 a share, each way (median round trip at h = 10: 16.4 bps of collateral and 1,031 bps of premium at 1x; 32.8 and 2,062 at 2x), in line with typical quoted half-spreads on liquid large-cap options; without quotes this is an assumption, so every result is repeated at 2x.
+We would not trade it. As tested: sell a 1-month put 3% below spot at `t_0` on each old-news filing (acceptance lag for the 251 trade-eligible filings: median 2 sessions, IQR 1 to 3; 64% enter the next session); close after 10 sessions; at most five positions; collateral strike × 100. The committed cost rule is the larger of 5% of premium or $0.05 a share, each way (median round trip at h = 10: 16.4 bps of collateral and 1,031 bps of premium at 1x; 32.8 and 2,062 at 2x), in line with typical quoted half-spreads on liquid large-cap options; without quotes this is an assumption, so every result is repeated at 2x.
 
-The 49-trade book returns +1.19% (marked drawdown −4.68%), −0.84% at double costs. H2: −0.09 points per trade against ordinary days (−0.86 to +0.64). The mean trade is +0.121%, +0.294% without its largest loss (C, −8.17%), and the top three trades exceed the whole P&L (167%).
+H2: −0.09 points per trade against ordinary days (−0.86 to +0.64). The mean trade is +0.121%, +0.294% without its largest loss (C, −8.17%), and the top three trades exceed the whole P&L (167%).
 
 ## 6. Performance evidence
 
-Table 1 is the committed strategy, shown because the track asks; H2 finds no difference from ordinary days. Daily returns come from the marked equity curve; idle days count as zero; no risk-free rate or collateral interest. No out-of-sample result exists (§1).
+Table 1 is the committed strategy, shown because the track asks. Daily returns come from the marked equity curve; idle days count as zero; no risk-free rate or collateral interest.
 
 | Old-news book, h = 10 | 2024-25, 1x | 2024-25, 2x |
 |---|---|---|
@@ -75,7 +75,7 @@ By year the book made +1.52% in 2024 and −0.33% in 2025 at 1x (+0.49% and −1
 
 *Figure 3. Cumulative P&L and drawdown of the old-news book at 1x and 2x costs, against the same put on matched ordinary days and on all late people-news filings.*
 
-Book returns at other horizons (1x): −4.91% at 1 session, −2.03% at 5, +2.52% held to expiry. Per trade:
+Book returns at other horizons (1x): −4.91% at 1 session, −2.03% at 5, +2.52% held to expiry.
 
 | h | n | Mean net P&L per trade, 1x (%) | 95% CI (%) | 2x mean (%) |
 |---|---|---|---|---|
@@ -91,43 +91,39 @@ Book returns at other horizons (1x): −4.91% at 1 session, −2.03% at 5, +2.52
 
 *Table 2. Old-news put trades taken by the book, net P&L per trade in % of collateral; bootstrap 95% CI (10,000 draws); a 1-month put expires before 42 and 63 sessions.*
 
-Net of costs the put loses at 1 to 3 sessions, with intervals below zero. At 10 sessions, +0.12% is indistinguishable from zero and below the same put on matched ordinary days (+0.23%, CI −0.22 to +0.64).
+The put loses at 1 to 3 sessions, intervals below zero. At 10 sessions, +0.12% is indistinguishable from zero and below the same put on matched ordinary days (+0.23%, CI −0.22 to +0.64).
 
 ## 7. Risk management
 
-**Limits.** At most five positions, in order of entry, each with a fifth of the book as cash collateral: no leverage or margin call. The book averaged 1.00 open position, at most 4. The largest single loss was −1.63% of the book at 1x (C, −8.17% of its collateral), −1.73% at 2x.
+**Limits.** Each of the five slots, filled in order of entry, holds a fifth of the book as cash: no leverage or margin call. The book averaged 1.00 open position, at most 4. The largest single loss was −1.63% of the book at 1x (C, −8.17% of its collateral), −1.73% at 2x.
 
 **Stops.** None beyond the position cap; every position is held 10 sessions. Untested candidates: a strike-breach exit and pausing entries when market-wide implied volatility jumps.
 
-**Market exposure.** Beta to the median TOP_100 daily return is 0.018 (R² 0.005, 492 days), understated because open puts are re-marked only at the fixed horizons and carried flat between, so daily volatility, Sharpe and beta use stale marks. Only market beta is estimated, because the permitted data have no stock or factor returns; a momentum and value regression is in §10.
+**Market exposure.** Beta to the median TOP_100 daily return is 0.018 (R² 0.005, 492 days), understated: open puts are re-marked only at the fixed horizons, so daily volatility, Sharpe and beta use stale marks. Only market beta is estimated: the permitted data have no stock or factor returns (§10).
 
-**Tail and regime.** Trade P&L skew is −1.72. The worst quarter by entry, 2025Q1, had 9 trades, −2.68% (−3.12% at 2x), hit rate 44.44%. Four of the five worst trades entered between 2024-12-05 and 2025-03-03 (C, INTC, AAPL, BAC; CSCO is the fifth); with no stop, five equal positions give no protection against such clustering.
+**Tail and regime.** Trade P&L skew is −1.72. The worst quarter by entry, 2025Q1, had 9 trades, −2.68% (−3.12% at 2x), hit rate 44.44%. Four of the five worst trades entered between 2024-12-05 and 2025-03-03 (C, INTC, AAPL, BAC; CSCO is the fifth); no stop guards against such clustering.
 
 ## 8. Liquidity and capital
 
-Each trade is capped at 10% of the put's entry-day volume, so the median trade takes $73,500 of collateral, and a five-slot book of about $367,500 fits half the trades; 8 of 49 trades allow no contract. In total the cap allows $25,704,500 of collateral and $306,932 of P&L at 1x. Capital turns over 5.01 times a year against the book and 25.13 against capital in use: the book is mostly idle.
+Each trade is capped at 10% of the put's entry-day volume, so the median trade takes $73,500 of collateral, and a five-slot book of about $367,500 fits half the trades; 8 of 49 trades allow no contract. In total the cap allows $25,704,500 of collateral and $306,932 of P&L at 1x. Capital turns over 5.01 times a year against the book, 25.13 against capital in use.
 
-The 1-month expiry is often a weekly that does not trade every session; marks are daily closes, and entry requires put volume above zero.
+Marks are daily closes; entry requires put volume above zero.
 
 ## 9. Data and integrity
 
-**Sources:** Massive and SEC EDGAR (References). With no stock prices, spot comes from ATM put-call parity on the same chain, so contracts adjusted for splits, which carry their own tickers, need no price adjustment; parity ignores dividends. The notebook ran without errors from a clean kernel with only the API key and response cache.
+**Sources:** Massive and SEC EDGAR (References). With no stock prices, spot comes from ATM put-call parity on the same chain, so contracts adjusted for splits, which carry their own tickers, need no price adjustment; parity ignores dividends. The notebook runs cleanly from a fresh kernel with only the API key and cache.
 
 **Survivorship.** The universe is the top 100 as of September 2026, firms that survived and grew: short-put P&L is biased upward for every book; the effect on the old-versus-surprise contrast cannot be signed.
 
 **Variants tested.** The ledger (`data/oldnews/ledger.csv`) has 420 rows: 242 for 2024-25 in five runs (113 primary tests, years and sensitivity grid; 1 entry at `t_0 + 1`; 96 trade books and H2 over two runs; 32 exploratory diagnostics) and 178 from four runs of the discarded 2022-23 setup (labels `discovery`, `dryrun`; commit 6c7ecdf), none used here. The dry run (2023-07-01 to 2023-12-31) overlaps July and August of the sealed placeholder (2023-06-01 to 2023-08-31); archived unused, it informed no 2024-25 choice. A 2026 run was stopped during the filing-list download (2026-10-04 01:16-01:17 ET), before any 2026 event was built.
 
-**Decision-log disclosures** (besides §4's earnings look-ahead). (1) The related-filing cue also matches the other filing's event date, slightly wider than the plan; it changes one placebo filing and no label. (2) The notebook path once used the excerpt word score, not the plan's primary full text; fixed, the excerpt result is a sensitivity (H1 −0.0118, one-sided p 0.4574). (3) A deleted scratch run of the starter's example cells made 3,283 uncached requests (ask-first limit 3,000) and marked late-2025 exits with 2026 prices; nothing from it was used, and in-sample work is clipped before 2026-01-01.
+**Decision-log disclosures** (besides §4). (1) The related-filing cue also matches the other filing's event date, slightly wider than the plan; it changes one placebo filing and no label. (2) The notebook path once used the excerpt word score, not the plan's primary full text; fixed, the excerpt result is a sensitivity (H1 −0.0118, one-sided p 0.4574). (3) A deleted scratch run of the starter's example cells made 3,283 uncached requests (ask-first limit 3,000) and marked late-2025 exits with 2026 prices; nothing from it was used, and in-sample work is clipped before 2026-01-01.
 
 ## 10. What we would test with more time
 
-- A longer sample: detecting a 0.10 difference needs about 296 events per group, against 45 and 101. 2022-23, if Massive allows, would be an independent sample under the frozen rules.
-- The math and word scores as separate committed hypotheses, since they barely agree (kappa 0.097).
-- The volatility channel directly: implied-volatility change, a delta-hedged straddle.
-- A momentum and value regression, given stock and factor returns.
-- Quotes instead of closes for costs, and daily marks for every open position.
-- An advance earnings calendar, removing the only input that looks past entry.
-- The §7 stop and volatility-pause rules, each committed first.
+- A longer sample: detecting a 0.10 difference needs about 296 events per group, against 45 and 101; 2022-23, if Massive allows, under the frozen rules.
+- Sharper tests, each committed first: math and word scores as separate hypotheses; a delta-hedged straddle for the volatility channel; the §7 stops.
+- Better inputs: quotes and daily marks, an advance earnings calendar, and stock and factor returns for a momentum and value regression.
 
 ## References
 
