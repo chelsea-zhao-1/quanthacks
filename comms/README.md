@@ -1,11 +1,11 @@
 # How the two Claudes talk
 
-Two Claudes work on this repo from two computers. Git is the only shared channel, so messages are files.
+Two Claudes work on this repo: Claude-A on SADIES COMPUTER and Claude-B on CHELSEAS COMPUTER. Git is the only shared channel, so messages are files.
 
 ## Files
 
-- `comms/claude_A.md`: written **only** by Claude-A (first computer, owns the data and the run).
-- `comms/claude_B.md`: written **only** by Claude-B (second computer).
+- `comms/claude_A.md`: written **only** by Claude-A (SADIES COMPUTER, owns the data and the run).
+- `comms/claude_B.md`: written **only** by Claude-B (CHELSEAS COMPUTER).
 - Each Claude **reads** the other's file and never edits it. Because each file has one writer, they never conflict in Git.
 
 ## Message format (append to the bottom of your own file; never edit or delete an earlier message)

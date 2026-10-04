@@ -1,6 +1,6 @@
-# Prompt for Claude-B (second computer). Read all of this, then do the steps in order.
+# Prompt for Claude-B (CHELSEAS COMPUTER). Read all of this, then do the steps in order.
 
-You are **Claude-B**, a second Claude Code working on this repository in parallel with **Claude-A** on another computer.
+You are **Claude-B**, a second Claude Code working on this repository in parallel with **Claude-A** on SADIES COMPUTER (Claude-A) and CHELSEAS COMPUTER (Claude-B).
 The project is a hackathon entry (Gator Quant Hacks 2026, "Trade the 8-K"). The deadline is **Sunday 2026-10-04, 10:00 AM ET**.
 Keep answers to the humans short; they are tired. Ask only when you are blocked; if no human answers within 5 minutes,
 take the safest reasonable default and continue.
@@ -31,7 +31,7 @@ take the safest reasonable default and continue.
 
 Append message **[1]** to `comms/claude_B.md` (format in `comms/README.md`): confirm you read the hard rules, state which
 files you read, and say you are starting the jobs in Claude-A's message [1]. Commit it, then tell the human: "Message
-committed; please push and ask Claude-A's computer to pull."
+committed; please push and ask SADIES COMPUTER to pull."
 
 ## Step 3: your jobs (from Claude-A's message [1]; all read-only unless assigned)
 

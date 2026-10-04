@@ -1,4 +1,4 @@
-# Handoff for a second Claude (other computer)
+# Handoff for a second Claude (CHELSEAS COMPUTER)
 
 Read this first, then `comms/README.md`. Written 2026-10-03 about 22:10 ET. Deadline: **Sun 2026-10-04, 10:00 AM ET**
 (Devpost and final code push); judges do not review later commits.
@@ -41,7 +41,7 @@ backtest; the judges grade novelty, rigor, replication on a sealed window, trade
 6. **Fetches.** Ask before any large fetch. SEC EDGAR: real `SEC_USER_AGENT`, at most 10 requests per second.
    HiPerGator: not in use; any use needs the human's approval first and strict adherence to UF rules.
 
-## What is on the first computer but not in Git
+## What is on SADIES COMPUTER but not in Git
 
 `.env` (the key), `.massive_cache/` (every API response), `data/` (events, measurements, results), the private
 `CLAUDE.md` and the agent context files. **Without the key and cache you cannot run the pipeline**; ask the human to
@@ -56,7 +56,7 @@ placebo, horizon profile, sensitivity, ledger), `trade.py` (cash-secured put boo
 judges' path), `figures.py`, `report.py`. Each has a synthetic test in `tests/`. Notebook section "Old news, new news"
 sits before the sealed-window cell.
 
-## State at handoff (first computer)
+## State at handoff (SADIES COMPUTER)
 
 - Download of 2024-25 option data: finishing about 22:05. Then, in order: measure 2024-25, freeze constants from 2024-25
   gap inputs (`src/oldnews/zref_frozen_insample.json`) and commit them, run classify, tests, trade **once**, figures,
@@ -65,9 +65,9 @@ sits before the sealed-window cell.
 
 ## Suggested split (no overlapping files)
 
-- **Claude-A (first computer, owns the data and the run):** measurement, classification, tests, trade runs, results
+- **Claude-A (SADIES COMPUTER, owns the data and the run):** measurement, classification, tests, trade runs, results
   files, the frozen constants, commits of results.
-- **Claude-B (this second computer):** an independent audit of lookahead and the window guards in `src/oldnews/*.py`
+- **Claude-B (CHELSEAS COMPUTER):** an independent audit of lookahead and the window guards in `src/oldnews/*.py`
   (read-only; report findings through `comms/`); proofreading `docs/note_draft.md` and `README.md` for the judges
   (propose edits through `comms/` first, then edit only the file you have been given); a judges'-path checklist from the
   notebook cells; anything the human assigns.
