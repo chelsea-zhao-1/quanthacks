@@ -18,13 +18,13 @@ Filings from 2024-01-01 to 2025-12-31, pooled, each year a check; spot from ATM 
 
 ## 3. Result
 
-Of 410 filings, 286 were late, 271 passed the earnings exclusion and 146 had usable outcomes: 45 old, 101 surprise, 59 tickers.
+Of 410 filings, 286 were late, 271 outside earnings windows and 146 usable: 45 old, 101 surprise, 59 tickers.
 
-H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0.2621), one-sided p = 0.8615; 2024 +0.0263, 2025 +0.1636; trimmed +0.0811. H1b has the predicted sign without significance: −0.0364 (−0.1435 to +0.0708), p = 0.2546. The placebo shows no difference: +0.0990 (−0.1092 to +0.3081), two-sided p = 0.4013. No horizon survives the correction.
+H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0.2621), one-sided p = 0.8615; 2024 +0.0263, 2025 +0.1636. H1b has the predicted sign without significance: −0.0364 (−0.1435 to +0.0708), p = 0.2546. The placebo shows no difference: +0.0990 (−0.1092 to +0.3081), two-sided p = 0.4013. No horizon survives the correction.
 
 ![Figure 1](../data/oldnews/figures/insample/fade_curve.png)
 
-*Figure 1. Mean Y_h, old versus surprise, 95% bands.*
+*Figure 1. Mean Y_h, old versus surprise.*
 
 | h | n | Old − surprise (95% CI) | BH q | 2026 |
 |---|---|---|---|---|
@@ -42,23 +42,22 @@ H1 has the opposite sign and is not significant: +0.0966 (95% CI −0.0685 to +0
 
 **Sensitivity** (23 one-at-a-time settings: weights, cutoff, bucket, strike, category, text source; grid in the notebook): 7 negative, range −0.1150 to +0.1536, smallest one-sided p 0.1999. `t_0 + 1` was not computed.
 
-**Exploratory diagnostics** (after the result): minimum detectable effect {{diag_mde}}; separation of pre-entry inputs {{diag_sep}}; trade mean without its most influential trade {{diag_influence}}.
+**Exploratory diagnostics** (after the result): the minimum detectable effect is 0.2109 (one-sided 5%, 80% power); the null rules out a true effect below −0.0429 but not a small negative one. Leaving out each of 59 tickers never flips the sign (+0.0553 to +0.1173).
 
 ## 4. What would break it
 
-- **Classifier.** It may not measure prior knowledge: H1b has the predicted sign; the old-versus-surprise split does not.
+- **Classifier.** Math and word labels barely agree (Cohen's kappa 0.097), and 35 of 45 old calls are events the math alone calls surprise, so "old news" mostly means disclosure wording.
 - **Private event date.** The cover-page date is the company's own, not when the market heard; mislabels shrink any difference.
 - **Selection.** Firms choose what to file late; the universe is today's top 100.
 - **Constants.** 2024 events are standardised partly with later gap inputs (never outcomes).
 - **Thin options.** Weekly 1-month expiries miss sessions; 16 gap-start marks are 1 to 3 sessions old; closes are not quotes; parity ignores dividends.
-- **Small sample.** With 45 old-news events, effects below {{diag_mde}} go undetected.
-- **Sealed window.** We predict no detectable old-versus-surprise difference; under 30 events is labelled descriptive.
+- **Sealed window.** We predict no detectable old-versus-surprise difference.
 
 ## 5. How to trade it
 
 We would not trade it. As tested: sell a 1-month put 3% below spot at `t_0` on each old-news filing and close after 10 sessions; at most five positions; collateral strike × 100; costs the larger of 5% of premium or $0.05 a share, each way.
 
-The 49-trade book returns +1.19% (+0.60% annualised), hit rate 67.3%, marked drawdown −4.68%; −0.84% at double costs. The same put on ordinary days returns +2.25% and +1.34% (two draws). H2: −0.09 points per trade against ordinary days (−0.86 to +0.64), −0.02 against all late filings (−0.51 to +0.44). The mean trade, +0.12%, is small against one loss (C, −8.17%). Capacity at 10% of entry-day put volume: median $73,500 per trade, a book near $367,500; 8 of 49 trades allow no contract.
+The 49-trade book returns +1.19% (+0.60% annualised), hit rate 67.3%, marked drawdown −4.68%; −0.84% at double costs. H2: −0.09 points per trade against ordinary days (−0.86 to +0.64), −0.02 against all late filings (−0.51 to +0.44). The mean trade, +0.12%, is small against one loss (C, −8.17%). Capacity at 10% of entry-day put volume: median $73,500 per trade, a book near $367,500; 8 of 49 trades allow no contract.
 
 ---
 
@@ -71,9 +70,15 @@ Delete this section before submission. `RN` = `data/oldnews/README_numbers.md` (
 | Placeholder | Source |
 |---|---|
 | `{{oos_h}}` (h = 1, 2, 3, 5, 10, 21, 42, 63, exp) | `data/oldnews/results_oos/profile.csv`, rows `test` = H1: `effect` (`ci_lo`, `ci_hi`). Only after a human runs the one-time 2026 test; otherwise delete the column and say 2026 was not run |
-| `{{diag_mde}}` | diagnostics agent: minimum detectable H1 effect (power), 2024-25 |
-| `{{diag_sep}}` | diagnostics agent: whether old and surprise differ on the pre-entry inputs |
-| `{{diag_influence}}` | diagnostics agent: old-news mean trade at h = 10, 1x, without the most influential trade. Needed to support "the mean depends on one trade"; until filled, only the C loss against the mean is stated |
+| (none left besides `{{oos_h}}`) | The diagnostics placeholders are filled below. No file gives the trade mean without its most influential trade, so the note states only the mean trade against the C loss. |
+
+**Filled from the exploratory diagnostics** (`D` = `data/oldnews/results_insample/diagnostics/`, run `20261003T223046-a26cb6`, git `2a67f5b61a`)
+
+| Value in the note | Source |
+|---|---|
+| MDE 0.2109; rules out below −0.0429 | `D/diagnostics.md` §1 (`D/power.csv`: `mde`, `rules_out_below`) |
+| 59 tickers left out, 0 sign flips, range +0.0553 to +0.1173 | `D/diagnostics.md` §3 (`D/influence.csv`: `n_left_out_runs`, `sign_flips`, `loto_min`, `loto_max`) |
+| Cohen's kappa 0.097; 35 of 45 old calls with math-only surprise and words-only old | `D/diagnostics.md` §2 (`D/agreement.csv`: row math_only = surprise, words_only = old, `of_which_primary_old`) |
 
 **Filled (2024-25 only)**
 
@@ -82,7 +87,7 @@ Delete this section before submission. `RN` = `data/oldnews/README_numbers.md` (
 | 1,245 ordinary days (constants) | RN §1 and §7 |
 | 337 variants in 6 runs | RN §8 |
 | 410, 286, 271, 146, 45, 101 (sample) | RN §2 (`people` column); RS "Counts" |
-| 59 tickers; H1 +0.0966, −0.0685, +0.2621, p 0.8615; trimmed +0.0811 | RN §3 (H1 row) |
+| 59 tickers; H1 +0.0966, −0.0685, +0.2621, p 0.8615 | RN §3 (H1 row) |
 | 2024 +0.0263, 2025 +0.1636 | RS "By year" (`results_insample/by_year.csv`) |
 | H1b −0.0364, −0.1435, +0.0708, p 0.2546, n 49 | RN §3 (H1b row) |
 | P +0.0990, −0.1092, +0.3081, two-sided p 0.4013 | RN §3 (P row) |
@@ -92,7 +97,6 @@ Delete this section before submission. `RN` = `data/oldnews/README_numbers.md` (
 | `t_0 + 1` not computed | RS "Not computed here" |
 | 16 stale gap-start marks | RS "Coverage" (`results_insample/coverage.csv`, `people`) |
 | +1.19%, +0.60%, 67.3%, −4.68%, −0.84% (old book, h = 10) | RN §6 "Books at h = 10" |
-| +2.25%, +1.34% (null_r1, null_r2, 1x) | RN §6 "Books at h = 10" |
 | H2 −0.09 (−0.86, +0.64); −0.02 (−0.51, +0.44) | RN §6 H2 table (1x rows) |
 | mean trade +0.12%; C −8.17% | RN §6 books table and "Five worst" |
 | $73,500; $367,500; 8 of 49 | RN §6 capacity table |
