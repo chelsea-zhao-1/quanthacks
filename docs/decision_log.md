@@ -80,3 +80,11 @@ with the reason and what had been looked at.
 - **Final QA passed** (commit b5a6a39): the whole notebook runs from a clean kernel with only the API key and the cache, zero
   errors, about 15 minutes; all 26 old-news result files are identical to the reported ones (H1 +0.0966, p 0.8615, 45 old;
   49 trades); no computation uses a date on or after 2026-01-01; the sealed cell is not run and the out-of-sample section is off.
+
+## 2026-10-04: the one-time out-of-sample run
+- The official track pages require it (Massive sub-track: the notebook's 2026-01-01..2026-08-31 window and the judges'
+  sealed window replace the track's 20% holdout; checklist: every fixed horizon in-sample and out-of-sample; Systematic
+  track: "run the out-of-sample period once and report the result, good or bad").
+- A human (Sadie, SADIES COMPUTER) gave the GO at about 00:55 ET and switches `RUN_OOS` on herself. Everything is frozen:
+  hypothesis, test plan, frozen 2024-25 constants (5bbfd9d), code. The run happens once; its result is reported whatever it
+  shows, and nothing is changed afterwards. `RUN_OOS` is switched back off in the shipped notebook after the run.
